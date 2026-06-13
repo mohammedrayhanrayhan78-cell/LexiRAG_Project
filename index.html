@@ -35,6 +35,12 @@
         .status { font-size: 12px; color: #4ade80; padding: 6px 10px; background: #0d2010; border-radius: 6px; display: none; }
         .status.error { color: #f87171; background: #200d0d; }
 
+        /* Mode selector */
+        .mode-selector { display: flex; gap: 6px; }
+        .mode-btn { flex: 1; padding: 7px 4px; border: 1px solid #2a2a4a; border-radius: 8px; background: #1a1a2e; color: #888; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; text-align: center; }
+        .mode-btn:hover { border-color: #7c6af7; color: #ccc; }
+        .mode-btn.active { background: #7c6af7; color: white; border-color: #7c6af7; }
+
         .chat { flex: 1; display: flex; flex-direction: column; }
         .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
         
@@ -42,6 +48,7 @@
         .message.user { background: #7c6af7; color: white; align-self: flex-end; border-radius: 12px 12px 2px 12px; }
         .message.bot { background: #1a1a2e; color: #e0e0e0; align-self: flex-start; border-radius: 12px 12px 12px 2px; }
         .message.bot .source { font-size: 11px; color: #666; margin-top: 8px; }
+        .message.bot .mode-tag { font-size: 10px; color: #7c6af7; margin-bottom: 4px; }
 
         .cursor { display: inline-block; width: 2px; height: 14px; background: #7c6af7; margin-left: 2px; animation: blink 0.7s infinite; vertical-align: middle; }
         @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
@@ -59,7 +66,7 @@
         .send-btn:disabled { background: #444; cursor: not-allowed; }
 
         @media (max-width: 600px) {
-            .sidebar { width: 100%; max-height: 220px; }
+            .sidebar { width: 100%; max-height: 260px; }
             .main { flex-direction: column; }
         }
     </style>
@@ -73,6 +80,13 @@
 
     <div class="main">
         <div class="sidebar">
+            <h2>AI Mode</h2>
+            <div class="mode-selector">
+                <div class="mode-btn active" onclick="setMode('ollama')" id="mode-ollama">🦙 Ollama</div>
+                <div class="mode-btn" onclick="setMode('groq')" id="mode-groq">⚡ Groq</div>
+                <div class="mode-btn" onclick="setMode('gemini')" id="mode-gemini">✨ Gemini</div>
+            </div>
+
             <h2>Documents</h2>
             <div class="upload-area" onclick="document.getElementById('fileInput').click()">
                 <input type="file" id="fileInput" accept=".pdf,.txt" onchange="handleFileSelect(event)">
@@ -83,7 +97,7 @@
             <div class="status" id="status"></div>
             <h2>Uploaded</h2>
             <div class="doc-list" id="docList">
-    <div style="font-size:12px;color:#555;">Loading...</div>
+                <div style="font-size:12px;color:#555;">Loading...</div>
             </div>
         </div>
 
@@ -104,8 +118,15 @@
     <script>
         const API = 'http://localhost:8000';
         let selectedFile = null;
-        let uploadedDocs = [];
+        let currentMode = 'ollama';
+
         renderDocList();
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`mode-${mode}`).classList.add('active');
+        }
 
         function handleFileSelect(event) {
             selectedFile = event.target.files[0];
@@ -136,7 +157,6 @@
                 const res = await fetch(`${API}/upload`, { method: 'POST', body: formData });
                 const data = await res.json();
                 showStatus('✓ ' + data.message, false);
-                uploadedDocs.push(selectedFile.name);
                 renderDocList();
                 selectedFile = null;
                 document.getElementById('fileInput').value = '';
@@ -149,50 +169,30 @@
         }
 
         async function renderDocList() {
-    const list = document.getElementById('docList');
-    try {
-        const res = await fetch(`${API}/documents`);
-        const data = await res.json();
-        if (data.documents.length === 0) {
-            list.innerHTML = '<div style="font-size:12px;color:#555;">No documents yet</div>';
-            return;
+            const list = document.getElementById('docList');
+            try {
+                const res = await fetch(`${API}/documents`);
+                const data = await res.json();
+                if (data.documents.length === 0) {
+                    list.innerHTML = '<div style="font-size:12px;color:#555;">No documents yet</div>';
+                    return;
+                }
+                list.innerHTML = data.documents.map(d => `
+                    <div class="doc-item" style="display:flex;justify-content:space-between;align-items:center;">
+                        <span>📄 ${d}</span>
+                        <button onclick="deleteDoc('${d}')" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:16px;">🗑</button>
+                    </div>
+                `).join('');
+            } catch {
+                list.innerHTML = '<div style="font-size:12px;color:#555;">Could not load</div>';
+            }
         }
-        list.innerHTML = data.documents.map(d => `
-            <div class="doc-item" style="display:flex;justify-content:space-between;align-items:center;">
-                <span>📄 ${d}</span>
-                <button onclick="deleteDoc('${d}')" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:16px;">🗑</button>
-            </div>
-        `).join('');
-    } catch {
-        list.innerHTML = '<div style="font-size:12px;color:#555;">Could not load</div>';
-    }
-}
 
-async function renderDocList() {
-    const list = document.getElementById('docList');
-    try {
-        const res = await fetch(`${API}/documents`);
-        const data = await res.json();
-        if (data.documents.length === 0) {
-            list.innerHTML = '<div style="font-size:12px;color:#555;">No documents yet</div>';
-            return;
+        async function deleteDoc(docName) {
+            if (!confirm(`Delete ${docName}?`)) return;
+            await fetch(`${API}/document/${encodeURIComponent(docName)}`, { method: 'DELETE' });
+            renderDocList();
         }
-        list.innerHTML = data.documents.map(d => `
-            <div class="doc-item" style="display:flex;justify-content:space-between;align-items:center;">
-                <span>📄 ${d}</span>
-                <button onclick="deleteDoc('${d}')" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:16px;">🗑</button>
-            </div>
-        `).join('');
-    } catch {
-        list.innerHTML = '<div style="font-size:12px;color:#555;">Could not load</div>';
-    }
-}
-
-async function deleteDoc(docName) {
-    if (!confirm(`Delete ${docName}?`)) return;
-    await fetch(`${API}/document/${encodeURIComponent(docName)}`, { method: 'DELETE' });
-    renderDocList();
-}
 
         function addMessage(text, type) {
             const msgs = document.getElementById('messages');
@@ -207,6 +207,8 @@ async function deleteDoc(docName) {
             return div;
         }
 
+        const modeLabels = { ollama: '🦙 Ollama', groq: '⚡ Groq', gemini: '✨ Gemini' };
+
         async function sendQuestion() {
             const input = document.getElementById('questionInput');
             const question = input.value.trim();
@@ -217,6 +219,11 @@ async function deleteDoc(docName) {
             addMessage(question, 'user');
             
             const botMsg = addMessage('', 'bot');
+            const modeTag = document.createElement('div');
+            modeTag.className = 'mode-tag';
+            modeTag.textContent = modeLabels[currentMode];
+            botMsg.appendChild(modeTag);
+
             const cursor = document.createElement('span');
             cursor.className = 'cursor';
             botMsg.appendChild(cursor);
@@ -225,7 +232,7 @@ async function deleteDoc(docName) {
                 const res = await fetch(`${API}/ask`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
+                    body: JSON.stringify({ question, mode: currentMode })
                 });
 
                 const reader = res.body.getReader();
@@ -248,7 +255,7 @@ async function deleteDoc(docName) {
                                 sources = data.sources;
                             } else if (data.type === 'token') {
                                 cursor.remove();
-                                botMsg.innerHTML += data.text;
+                                botMsg.appendChild(document.createTextNode(data.text));
                                 botMsg.appendChild(cursor);
                                 document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
                             } else if (data.type === 'done') {

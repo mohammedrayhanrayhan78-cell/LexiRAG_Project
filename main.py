@@ -6,7 +6,7 @@ import os
 import json
 from database import init_db, save_chunk, delete_document, get_documents
 from embeddings import get_embedding
-from rag import find_relevant_chunks, ask_gemma_stream
+from rag import find_relevant_chunks, ask_llm_stream
 
 app = FastAPI()
 
@@ -66,13 +66,14 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/ask")
 async def ask_question(payload: dict):
     question = payload.get("question")
+    mode = payload.get("mode", "ollama")  # ollama / groq / gemini
     query_embedding = get_embedding(question)
     relevant_chunks = find_relevant_chunks(query_embedding)
     sources = list(set([c["doc_name"] for c in relevant_chunks]))
 
     def stream():
         yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
-        for token in ask_gemma_stream(question, relevant_chunks):
+        for token in ask_llm_stream(question, relevant_chunks, mode=mode):
             yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 

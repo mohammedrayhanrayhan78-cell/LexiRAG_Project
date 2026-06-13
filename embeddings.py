@@ -1,7 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from langdetect import detect
 
-model = SentenceTransformer('./models/all-MiniLM-L6-v2')
+model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 SUPPORTED_LANGUAGES = {
     'hi': 'Hindi',
