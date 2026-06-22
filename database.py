@@ -58,3 +58,18 @@ def get_documents():
     docs = [row[0] for row in cursor.fetchall()]
     conn.close()
     return docs
+
+def save_chunks_batch(doc_name, chunks, embeddings):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # This pairs up each chunk with its matching embedding
+    data = [(doc_name, chunk, json.dumps(emb.tolist())) for chunk, emb in zip(chunks, embeddings)]
+    
+    # Save them all at once!
+    cursor.executemany(
+        "INSERT INTO chunks (doc_name, chunk_text, embedding) VALUES (?, ?, ?)",
+        data
+    )
+    conn.commit()
+    conn.close()

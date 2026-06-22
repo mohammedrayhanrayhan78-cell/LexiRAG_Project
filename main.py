@@ -1,11 +1,11 @@
+from database import init_db, save_chunk, delete_document, get_documents, save_chunks_batch
+from embeddings import get_embedding, get_embeddings_batch
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import pdfplumber
 import os
 import json
-from database import init_db, save_chunk, delete_document, get_documents
-from embeddings import get_embedding
 from rag import find_relevant_chunks, ask_llm_stream
 
 app = FastAPI()
@@ -54,12 +54,17 @@ async def upload_document(file: UploadFile = File(...)):
     with open(filepath, "wb") as f:
         f.write(await file.read())
     
+    # Extract text from the saved file
     text = extract_text(filepath)
+    
+    # Split the text into smaller chunks
     chunks = split_into_chunks(text)
     
-    for chunk in chunks:
-        embedding = get_embedding(chunk)
-        save_chunk(file.filename, chunk, embedding)
+    # Get all embeddings at once using the batch function
+    embeddings = get_embeddings_batch(chunks)
+    
+    # Save everything to the database in one single go
+    save_chunks_batch(file.filename, chunks, embeddings)
     
     return {"message": f"Uploaded and processed {len(chunks)} chunks from {file.filename}"}
 

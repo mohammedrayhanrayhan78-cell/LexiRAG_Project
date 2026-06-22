@@ -5,9 +5,9 @@ import os
 from database import get_all_chunks
 from embeddings import detect_language
 
-# API Keys - set these as environment variables
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# API Keys - add your actual keys here
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "grok_api_key_here")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "gemini_api_key_here")
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -16,12 +16,12 @@ def find_relevant_chunks(query_embedding, top_k=4):
     all_chunks = get_all_chunks()
     if not all_chunks:
         return []
-    
+
     scored = []
     for chunk in all_chunks:
         score = cosine_similarity(query_embedding, chunk["embedding"])
         scored.append((score, chunk))
-    
+
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for score, chunk in scored[:top_k]]
 
@@ -34,8 +34,10 @@ def build_prompt(question, context_chunks):
     else:
         lang_instruction = f"The user is asking in {lang_name}. Answer in {lang_name} language."
 
-    prompt = f"""You are a helpful assistant. Answer the question using ONLY the context provided below.
-If the answer is not in the context, say so in the same language as the question.
+    prompt = f"""You are LexiRAG, a humble, polite and helpful AI document assistant. 
+Always be respectful, kind, and encouraging in your responses.
+Answer the question using ONLY the context provided below.
+If the answer is not in the context, politely say so in the same language as the question.
 {lang_instruction}
 
 Context:
@@ -78,7 +80,7 @@ def ask_groq_stream(question, context_chunks):
         return
 
     if not GROQ_API_KEY:
-        yield "Groq API key not set. Add GROQ_API_KEY environment variable."
+        yield "Groq API key not set."
         return
 
     prompt = build_prompt(question, context_chunks)
@@ -91,12 +93,16 @@ def ask_groq_stream(question, context_chunks):
                 "Content-Type": "application/json"
             },
             json={
-                "model": "gemma2-9b-it",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": True
             },
             stream=True
         )
+
+        if response.status_code != 200:
+            yield f"Groq Error: {response.text}"
+            return
 
         for line in response.iter_lines():
             if line:
@@ -122,20 +128,24 @@ def ask_gemini_stream(question, context_chunks):
         return
 
     if not GEMINI_API_KEY:
-        yield "Gemini API key not set. Add GEMINI_API_KEY environment variable."
+        yield "Gemini API key not set."
         return
 
     prompt = build_prompt(question, context_chunks)
 
     try:
         response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}",
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [{"parts": [{"text": prompt}]}]
             },
             stream=True
         )
+
+        if response.status_code != 200:
+            yield f"Gemini Error: {response.text}"
+            return
 
         for line in response.iter_lines():
             if line:
