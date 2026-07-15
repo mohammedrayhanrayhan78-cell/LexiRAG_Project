@@ -4,3 +4,5 @@ models/
 venv/
 __pycache__/
 .env
+lexirag-react/node_modules/
+lexirag-react/dist/

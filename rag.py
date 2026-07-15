@@ -6,8 +6,35 @@ from database import get_all_chunks
 from embeddings import detect_language
 
 # API Keys - add your actual keys here
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "grok_api_key_here")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "gemini_api_key_here")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "GROQ_API_KEY_HERE")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "GEMINI_API_KEY_HERE")
+
+def classify_complexity(question):
+    """
+    Decide if a question is SIMPLE or COMPLEX
+    
+    WHY: Route simple questions to fast cloud models (Groq/Gemini)
+    and complex questions to Ollama (local, more compute time available)
+    
+    LOGIC:
+    - Word count > 15 = likely complex (multi-part question)
+    - Certain keywords indicate deep reasoning needed
+    """
+    word_count = len(question.split())
+    
+    complex_keywords = [
+        'compare', 'explain in detail', 'analyze', 'why does', 'why is',
+        'how does', 'difference between', 'pros and cons', 'summarize',
+        'evaluate', 'relationship between', 'implications', 'in depth'
+    ]
+    
+    question_lower = question.lower()
+    
+    # If long question OR contains complex reasoning keywords = complex
+    if word_count > 15 or any(kw in question_lower for kw in complex_keywords):
+        return 'complex'
+    
+    return 'simple'
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -39,6 +66,14 @@ Always be respectful, kind, and encouraging in your responses.
 Answer the question using ONLY the context provided below.
 If the answer is not in the context, politely say so in the same language as the question.
 {lang_instruction}
+
+FORMATTING RULES:
+- Use markdown formatting to make answers easy to scan
+- Use bullet points (-) for lists of items, features, or steps
+- Use **bold** for key terms or important values
+- Use short paragraphs (2-3 sentences max) instead of long blocks of text
+- Use numbered lists for sequential steps
+- Keep it clean and structured, not one giant paragraph
 
 Context:
 {context}
@@ -135,7 +170,7 @@ def ask_gemini_stream(question, context_chunks):
 
     try:
         response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}",
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [{"parts": [{"text": prompt}]}]
@@ -160,11 +195,32 @@ def ask_gemini_stream(question, context_chunks):
     except Exception as e:
         yield f"Gemini error: {str(e)}"
 
-# --- MAIN ROUTER ---
-def ask_llm_stream(question, context_chunks, mode="ollama"):
-    if mode == "groq":
+# --- MAIN ROUTER (AUTO-SELECTS MODEL) ---
+def ask_llm_stream(question, context_chunks, mode="auto"):
+    """
+    If mode="auto", automatically pick the best model:
+    - Complex questions -> Ollama (local)
+    - Simple English questions -> Groq (fast)
+    - Simple regional language questions -> Gemini (strong multilingual)
+    
+    If mode is explicitly set (manual override), respect it.
+    """
+    if mode == "auto":
+        complexity = classify_complexity(question)
+        lang_code, _ = detect_language(question)
+
+        if complexity == 'complex':
+            selected_mode = 'ollama'
+        elif lang_code != 'en':
+            selected_mode = 'gemini'
+        else:
+            selected_mode = 'groq'
+    else:
+        selected_mode = mode
+
+    if selected_mode == "groq":
         yield from ask_groq_stream(question, context_chunks)
-    elif mode == "gemini":
+    elif selected_mode == "gemini":
         yield from ask_gemini_stream(question, context_chunks)
     else:
         yield from ask_ollama_stream(question, context_chunks)
