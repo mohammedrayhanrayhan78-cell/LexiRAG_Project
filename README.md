@@ -1,163 +1,149 @@
-# ⚡ LexiRAG — Local AI Document Assistant
+# ⚡ LexiRAG
 
-> Ask questions about your documents. Completely offline. No API keys. No internet needed.
-
-LexiRAG is an offline RAG (Retrieval Augmented Generation) system that lets you upload PDFs and ask questions about them in natural language — including Indian regional languages like Hindi, Kannada, Tamil, and Telugu.
-
-Built with a real RAG pipeline: local embeddings, vector similarity search, and a locally running LLM via Ollama.
+**Offline-capable RAG (Retrieval-Augmented Generation) document chat application** — upload your documents and ask questions in natural language, including regional Indian languages.
 
 ---
 
-## Features
+## 🎯 What is LexiRAG?
 
-- **100% Offline** — No internet required after setup. Your documents never leave your machine.
-- **Regional Language Support** — Ask questions in Hindi, Kannada, Tamil, Telugu, or English.
-- **Streaming Answers** — Responses stream token by token like ChatGPT.
-- **Source Citations** — Every answer shows which document it came from.
-- **Document Management** — Upload multiple PDFs, delete them anytime.
-- **Clean Dark UI** — Cyberpunk-themed interface, mobile responsive.
+LexiRAG lets you upload PDF/TXT documents and have natural conversations with them. It combines local, offline AI with cloud-powered models, automatically choosing the best one for each question — no manual configuration needed.
 
 ---
 
-## Tech Stack
+## ✨ Key Features
 
-| Layer | Technology |
+- **🔀 Multi-LLM Auto-Routing** — The system automatically selects the right model per question:
+  - Simple queries → **Groq** (llama-3.3-70b, fast) for English, **Gemini** for regional languages
+  - Complex, multi-part queries → **Ollama** (Gemma 2B, runs 100% locally/offline)
+- **🌐 Regional Language Support** — Hindi, Kannada, Tamil, Telugu, and English, auto-detected
+- **📄 Smart PDF Processing** — Text extraction via `pdfplumber`, with automatic OCR fallback (`pytesseract`) for scanned/image-based PDFs
+- **🔒 Chat-Scoped Document Isolation** — Documents and conversations are isolated per chat and per user
+- **⚡ Streaming Responses** — Token-by-token streaming via Server-Sent Events (SSE)
+- **📚 Source Citations** — Every answer references the exact document it came from
+- **📝 Structured Answers** — Responses are formatted with markdown (bullet points, bold, headings) for readability, rendered via `react-markdown`
+- **💾 Session Persistence** — Active chat stays open across page refreshes
+- **🎨 Clean, Dark, Responsive, Full-Width UI** — Built with React + Vite
+
+---
+
+## 🔒 Security
+
+LexiRAG went through a 10-point security audit and hardening pass:
+
+| Protection | Implementation |
 |---|---|
-| Frontend | HTML, CSS, Vanilla JS |
-| Backend | Python, FastAPI |
-| Local LLM | Ollama + Gemma 2B |
-| Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
-| Vector Storage | SQLite (cosine similarity search) |
-| PDF Processing | pdfplumber |
-| Language Detection | langdetect |
+| Rate Limiting | `slowapi` + **Redis-backed storage** — 5/min on login & signup, 20/hour on upload, ask, and chat creation (persists across server restarts) |
+| XSS Prevention | Backend sanitization (`html.escape`) on all user-supplied chat names |
+| Auth | JWT-based, 7-day expiry, with graceful `401` handling (no server crashes on expired tokens) |
+| Password Storage | `passlib` with `pbkdf2_sha256` hashing (no Rust dependency, Windows-friendly) |
+| SQL Injection | Fully parameterized queries |
+| CSRF / Path Traversal | Blocked via CORS policy and route validation |
+| API Key Management | `.env` file (git-ignored), never hardcoded |
+| Corrupted File Handling | Uploads that fail extraction return a clean `400` error instead of crashing the server |
 
 ---
 
-## How It Works
+## 🛠️ Tech Stack
 
-```
-User uploads PDF
-      ↓
-Extract text (pdfplumber)
-      ↓
-Split into 300-word chunks with overlap
-      ↓
-Generate embeddings locally (sentence-transformers)
-      ↓
-Store chunks + embeddings in SQLite
-      ↓
-User asks a question
-      ↓
-Convert question to embedding
-      ↓
-Find top 4 most similar chunks (cosine similarity)
-      ↓
-Send question + context to Ollama (Gemma 2B)
-      ↓
-Stream answer back with source citation
-```
+**Backend:** FastAPI · SQLite · pdfplumber · pytesseract (OCR) · sentence-transformers (`all-MiniLM-L6-v2`) · JWT · slowapi · Redis
+
+**Frontend:** React (Vite) · Axios · react-markdown
+
+**LLMs:**
+- 🦙 **Ollama** (Gemma 2B) — local, offline, privacy-first
+- ⚡ **Groq** (llama-3.3-70b-versatile) — fast cloud inference
+- ✨ **Gemini** (2.5-flash) — strong multilingual support
 
 ---
 
-## Setup & Run
-
-### Prerequisites
-- Python 3.10+
-- [Ollama](https://ollama.ai) installed
-
-### 1. Clone the repo
-```bash
-git clone https://github.com/mohammedrayhanrayhan78-cell/LexiRAG_Project.git
-cd LexiRAG_Project
+## 🏗️ Architecture
+---
+```
+User → React (built as static files) served directly by FastAPI on one port
+                              ↓
+                        FastAPI Backend → SQLite (chunks/chats/users)
+                              ↓
+                  Auto-Router (complexity + language)
+                    ↓          ↓           ↓
+                 Ollama      Groq       Gemini
+                (local)    (cloud)     (cloud)
 ```
 
-### 2. Create virtual environment
-```bash
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Mac/Linux
+> Frontend and backend are served from a single port — the React app is built (`npm run build`) and mounted as static files by FastAPI, so only one deployment target / tunnel is needed.
+
+---
+
+## 📁 Project Structure
+
+```
+LexiRAG_Project/
+├── main.py              # FastAPI app, routes, auth, static file mount
+├── database.py           # SQLite operations, password hashing
+├── embeddings.py          # sentence-transformers, language detection
+├── rag.py                 # RAG pipeline, LLM routing, prompts
+├── requirements.txt
+├── .env                   # API keys (git-ignored)
+└── lexirag-react/          # React frontend (Vite)
+    ├── src/
+    │   ├── pages/          # Chat.jsx, Login.jsx, Signup.jsx
+    │   └── styles/
+    └── dist/                # Production build (git-ignored, generated)
 ```
 
-### 3. Install dependencies
-```bash
-pip install fastapi uvicorn pdfplumber sentence-transformers langdetect numpy requests
-```
+## 🚀 Getting Started
 
-### 4. Download embedding model
+### Backend
 ```bash
-python -c "from huggingface_hub import snapshot_download; snapshot_download('sentence-transformers/all-MiniLM-L6-v2', local_dir='./models/all-MiniLM-L6-v2')"
-```
+# Activate virtual environment
+venv\Scripts\activate
 
-### 5. Pull Gemma 2B via Ollama
-```bash
-ollama pull gemma2:2b
-```
+# Install dependencies
+pip install -r requirements.txt
 
-### 6. Start Ollama (separate terminal)
-```bash
-ollama serve
-```
+# Add API keys to .env
+GROQ_API_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
+REDIS_URL=your_redis_connection_string
 
-### 7. Start FastAPI backend
-```bash
+# Run server
 uvicorn main:app --reload
 ```
 
-### 8. Open the app
-Open `index.html` in your browser. That's it.
-
----
-
-## Project Structure
-
+### Frontend
+```bash
+cd lexirag-react
+npm install
+npm run build      # generates dist/, served automatically by FastAPI at localhost:8000
 ```
-LexiRAG/
-├── main.py          # FastAPI backend, all API routes
-├── database.py      # SQLite operations (save, retrieve, delete chunks)
-├── embeddings.py    # Sentence transformer model, language detection
-├── rag.py           # Cosine similarity search, Ollama streaming
-├── index.html       # Frontend UI
-├── models/          # Local embedding model
-├── uploads/         # Uploaded documents
-└── lexirag.db       # SQLite database
+
+### Ollama (for offline mode)
+```bash
+ollama serve
+ollama pull gemma2:2b
 ```
 
 ---
 
-## API Endpoints
+## 📌 Known Limitations
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/upload` | Upload and process a PDF/TXT file |
-| POST | `/ask` | Ask a question (streaming SSE response) |
-| GET | `/documents` | List all uploaded documents |
-| DELETE | `/document/{name}` | Delete a document |
-| GET | `/health` | Health check |
+- Gemini free-tier quota is limited
+- Groq models are periodically deprecated by the provider — verify model name at [console.groq.com](https://console.groq.com/docs/deprecations)
+- Document upload/embedding generation is CPU-bound; very large PDFs may take noticeably longer
 
 ---
 
-## Roadmap
+## 🗺️ Roadmap
 
-- [x] Core RAG pipeline
-- [x] Streaming responses
-- [x] Regional language support
-- [x] Document management (upload/delete)
-- [ ] GCP Cloud deployment
-- [ ] Mobile app (React Native)
-- [ ] Multi-document Q&A
-- [ ] Audio input support
+- [ ] Deploy backend to Azure for Students
+- [ ] CI/CD pipeline (GitHub Actions → Azure)
+- [ ] Background job queue (Redis + task queue) for non-blocking document processing
+- [ ] Multiple file upload in one go
+- [ ] Self-hosted Ollama on Raspberry Pi / Orange Pi
 
 ---
 
-## Built By
+## 👤 Author
 
-**Mohammed Rayhan** — 1st Year CSE Student, REVA University, Bengaluru  
-DSA Club Coordinator | Generative AI + Cloud enthusiast
+**Mohammed Rayhan** — B.Tech CSE, REVA University, Bengaluru
 
-> *"Spend time on RAG since it can be one life-changing project."* — Senior advice that started this.
-
----
-
-## License
-
-MIT License — free to use, modify, and distribute.
+[GitHub](https://github.com/mohammedrayhanrayhan78-cell/LexiRAG_Project)
