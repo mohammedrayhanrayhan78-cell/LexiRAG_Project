@@ -657,4 +657,4 @@ async def rename_chat(
 
 
 # Serve React frontend (must be added AFTER all API routes)
-app.mount("/", StaticFiles(directory="lexirag-react/dist", html=True), name="static")
+app.mount("/", StaticFiles(directory="lexirag-react/dist", html=True, check_dir=False), name="static")
