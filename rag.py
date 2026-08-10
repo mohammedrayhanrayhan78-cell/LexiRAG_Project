@@ -96,7 +96,7 @@ def ask_ollama_stream(question, context_chunks):
             "model": "gemma2:2b",
             "prompt": prompt,
             "stream": True
-        }, stream=True)
+        }, stream=True, timeout=3)
 
         for line in response.iter_lines():
             if line:
@@ -105,8 +105,9 @@ def ask_ollama_stream(question, context_chunks):
                     yield data["response"]
                 if data.get("done"):
                     break
-    except Exception as e:
-        yield f"Ollama error: {str(e)}. Make sure Ollama is running locally."
+    except Exception:
+        # Ollama not reachable (e.g. cloud deployment) -> fall back to Groq
+        yield from ask_groq_stream(question, context_chunks)
 
 # --- GROQ (online, fast, free) ---
 def ask_groq_stream(question, context_chunks):
