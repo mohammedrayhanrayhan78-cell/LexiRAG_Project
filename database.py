@@ -123,7 +123,7 @@ def get_documents():
     conn.close()
     return docs
 
-def save_chunks_batch(doc_name, chunks, embeddings):
+def save_chunks_batch(doc_name, chunks, embeddings, chat_id=None):
     """
     Save MULTIPLE chunks at once (more efficient than save_chunk)
     
@@ -131,6 +131,7 @@ def save_chunks_batch(doc_name, chunks, embeddings):
     - doc_name: filename
     - chunks: list of text pieces
     - embeddings: list of vectors (one per chunk)
+    - chat_id: optional chat session ID for scoping chunks
     
     WHY: When uploading a 10-page PDF, it becomes 50 chunks
     Saving all 50 at once is faster than saving one at a time
@@ -138,13 +139,13 @@ def save_chunks_batch(doc_name, chunks, embeddings):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Pair up chunks with embeddings: [(chunk1, emb1), (chunk2, emb2), ...]
-    data = [(doc_name, chunk, json.dumps(emb.tolist())) 
+    # Pair up chunks with embeddings and chat_id
+    data = [(doc_name, chunk, json.dumps(emb.tolist() if hasattr(emb, "tolist") else emb), chat_id) 
             for chunk, emb in zip(chunks, embeddings)]
     
     # executemany = insert multiple rows in one operation
     cursor.executemany(
-        "INSERT INTO chunks (doc_name, chunk_text, embedding) VALUES (?, ?, ?)",
+        "INSERT INTO chunks (doc_name, chunk_text, embedding, chat_id) VALUES (?, ?, ?, ?)",
         data
     )
     conn.commit()
@@ -349,3 +350,101 @@ def is_blocked(username):
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else False
+
+def get_chat_owner(chat_id):
+    """Get username who owns this chat_id, or None if not found"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT username FROM chat_sessions WHERE id = ?", (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def delete_chat_and_chunks(chat_id):
+    """
+    Delete entire chat session, all its messages, AND all its chunks.
+    Ensures complete cleanup of chunk embeddings and text.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chunks WHERE chat_id = ?", (chat_id,))
+    cursor.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+    cursor.execute("DELETE FROM chat_sessions WHERE id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def delete_chat_document(chat_id, doc_name):
+    """
+    Delete all chunks of a specific document within a specific chat.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM chunks WHERE chat_id = ? AND doc_name = ?",
+        (chat_id, doc_name)
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+def delete_user_document(username, doc_name):
+    """
+    Delete all chunks of doc_name across all chats owned by username.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM chunks WHERE doc_name = ? AND chat_id IN (SELECT id FROM chat_sessions WHERE username = ?)",
+        (doc_name, username)
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+def get_chat_documents(chat_id):
+    """Get all unique document names within a specific chat"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT DISTINCT doc_name FROM chunks WHERE chat_id = ?",
+        (chat_id,)
+    )
+    docs = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return docs
+
+def delete_user_account(username):
+    """
+    Delete a user and ALL their data:
+    1. Chunks in all their chats
+    2. Messages in all their chats
+    3. All their chat sessions
+    4. The user account itself
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Delete chunks for this user's chats
+    cursor.execute(
+        "DELETE FROM chunks WHERE chat_id IN (SELECT id FROM chat_sessions WHERE username = ?)",
+        (username,)
+    )
+    # Delete chat messages
+    cursor.execute(
+        "DELETE FROM chat_messages WHERE chat_id IN (SELECT id FROM chat_sessions WHERE username = ?)",
+        (username,)
+    )
+    # Delete chat sessions
+    cursor.execute(
+        "DELETE FROM chat_sessions WHERE username = ?",
+        (username,)
+    )
+    # Delete user record
+    cursor.execute(
+        "DELETE FROM users WHERE username = ?",
+        (username,)
+    )
+    conn.commit()
+    conn.close()
+    return True

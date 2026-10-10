@@ -23,7 +23,7 @@ export default function Login({ onLoginSuccess, onSwitchToSignup }) {
   const [loading, setLoading] = useState(false);    // Is logging in?
   
   // API endpoint
-  const API = '';
+  const API = 'http://localhost:8000';
   
   // ============================================
   // FUNCTION - Handle form submission

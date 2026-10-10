@@ -133,7 +133,8 @@ def ask_groq_stream(question, context_chunks):
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": True
             },
-            stream=True
+            stream=True,
+            timeout=(5, 30)
         )
 
         if response.status_code != 200:
@@ -176,7 +177,8 @@ def ask_gemini_stream(question, context_chunks):
             json={
                 "contents": [{"parts": [{"text": prompt}]}]
             },
-            stream=True
+            stream=True,
+            timeout=(5, 30)
         )
 
         if response.status_code != 200:
