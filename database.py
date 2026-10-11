@@ -10,6 +10,7 @@
 # 1. ALL IMPORTS AT TOP
 # ============================================
 
+import os
 import sqlite3  # Python's built-in database library
 import numpy as np  # For working with vectors/embeddings
 import json  # For converting Python objects to/from JSON text
@@ -17,7 +18,7 @@ from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-DB_PATH = "lexirag.db"  # SQLite database file location
+DB_PATH = os.getenv("DATABASE_PATH", "lexirag.db")  # SQLite database file location
 
 # ============================================
 # 2. CHUNKS TABLE - Stores document pieces
@@ -333,7 +334,7 @@ def create_new_chat(username, chat_name):
 
 def block_account(username):
     """Block account after multiple failed attempts"""
-    conn = sqlite3.connect("lexirag.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE users SET blocked = 1 WHERE username = ?",
@@ -344,7 +345,7 @@ def block_account(username):
 
 def is_blocked(username):
     """Check if account is blocked"""
-    conn = sqlite3.connect("lexirag.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT blocked FROM users WHERE username = ?", (username,))
     result = cursor.fetchone()

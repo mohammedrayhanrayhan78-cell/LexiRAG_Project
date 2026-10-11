@@ -1,0 +1,1 @@
+[IO.File]::WriteAllText("$PWD\apply_cloud_ready.py",(Get-Clipboard -Raw))

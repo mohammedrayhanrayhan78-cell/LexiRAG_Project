@@ -6,3 +6,8 @@ __pycache__/
 .env
 lexirag-react/node_modules/
 lexirag-react/dist/
+.env.*
+!.env.example
+!lexirag-react/.env.example
+*.bak
+.pytest_cache/

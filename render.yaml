@@ -1,0 +1,51 @@
+# Render Blueprint: backend (Docker web service) + frontend (static site), deployed separately.
+services:
+  - type: web
+    name: lexirag-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENV
+        value: prod
+      - key: JWT_SECRET_KEY
+        generateValue: true          # Render creates a long random secret for you
+      - key: GROQ_API_KEY
+        sync: false                  # paste in the Render dashboard (never in Git)
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false                  # exact frontend URL, e.g. https://lexirag-web.onrender.com
+      - key: DATABASE_PATH
+        value: /tmp/lexirag.db       # EPHEMERAL: data resets on restart/spin-down (see README)
+      - key: REDIS_URL
+        sync: false                  # optional; without it rate limits live in memory
+
+  - type: web
+    name: lexirag-web
+    runtime: static
+    rootDir: lexirag-react
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false                  # exact backend URL, e.g. https://lexirag-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=()

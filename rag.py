@@ -2,19 +2,22 @@ import numpy as np
 import requests
 import json
 import os
+import logging
 from database import get_all_chunks
 from embeddings import detect_language
 
-# API Keys - add your actual keys here
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "GROQ_API_KEY_HERE")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "GEMINI_API_KEY_HERE")
+logger = logging.getLogger("lexirag.rag")
+
+# API keys come from environment variables only (never hard-code them)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def classify_complexity(question):
     """
     Decide if a question is SIMPLE or COMPLEX
     
     WHY: Route simple questions to fast cloud models (Groq/Gemini)
-    and complex questions to Ollama (local, more compute time available)
+    (kept for compatibility; routing now depends on language, with automatic fallback)
     
     LOGIC:
     - Word count > 15 = likely complex (multi-part question)
@@ -83,44 +86,23 @@ Question: {question}
 Answer:"""
     return prompt
 
-# --- OLLAMA (fully offline) ---
-def ask_ollama_stream(question, context_chunks):
-    if not context_chunks:
-        yield "No relevant documents found. Please upload a document first."
-        return
+# ============================================
+# LLM PROVIDERS (Groq + Gemini) with safe fallback
+# ============================================
 
-    prompt = build_prompt(question, context_chunks)
+class LLMUnavailable(Exception):
+    """Raised when no provider could answer. The message is always safe to show to users."""
 
-    try:
-        response = requests.post("http://localhost:11434/api/generate", json={
-            "model": "gemma2:2b",
-            "prompt": prompt,
-            "stream": True
-        }, stream=True, timeout=3)
+GENERIC_LLM_ERROR = "The AI service is temporarily unavailable. Please try again in a moment."
+NO_CONTEXT_MESSAGE = "No relevant documents found. Please upload a document first."
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 60
 
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-                if data.get("done"):
-                    break
-    except Exception:
-        # Ollama not reachable (e.g. cloud deployment) -> fall back to Groq
-        yield from ask_groq_stream(question, context_chunks)
 
-# --- GROQ (online, fast, free) ---
-def ask_groq_stream(question, context_chunks):
-    if not context_chunks:
-        yield "No relevant documents found. Please upload a document first."
-        return
-
+def _stream_groq(prompt):
+    """Yield tokens from Groq. Raises LLMUnavailable (with a safe message) on any failure."""
     if not GROQ_API_KEY:
-        yield "Groq API key not set."
-        return
-
-    prompt = build_prompt(question, context_chunks)
-
+        raise LLMUnavailable("groq key missing")
     try:
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -134,96 +116,128 @@ def ask_groq_stream(question, context_chunks):
                 "stream": True
             },
             stream=True,
-            timeout=(5, 30)
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
         )
+    except requests.RequestException as e:
+        logger.warning("groq request failed: %s", type(e).__name__)
+        raise LLMUnavailable("groq unreachable") from None
 
+    with response:
         if response.status_code != 200:
-            yield f"Groq Error: {response.text}"
-            return
-
-        for line in response.iter_lines():
-            if line:
+            logger.warning("groq returned status %s", response.status_code)
+            raise LLMUnavailable("groq bad status")
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
                 line = line.decode("utf-8")
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str.strip() == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                        delta = data["choices"][0]["delta"]
-                        if "content" in delta:
-                            yield delta["content"]
-                    except:
-                        continue
-    except Exception as e:
-        yield f"Groq error: {str(e)}"
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data_str)["choices"][0]["delta"]
+                except (ValueError, KeyError, IndexError):
+                    continue
+                if delta.get("content"):
+                    yield delta["content"]
+        except requests.RequestException as e:
+            logger.warning("groq stream interrupted: %s", type(e).__name__)
+            raise LLMUnavailable("groq stream interrupted") from None
 
-# --- GEMINI (online, powerful) ---
-def ask_gemini_stream(question, context_chunks):
-    if not context_chunks:
-        yield "No relevant documents found. Please upload a document first."
-        return
 
+def _stream_gemini(prompt):
+    """Yield tokens from Gemini. Key is sent in a header (never in the URL, so it cannot leak into errors)."""
     if not GEMINI_API_KEY:
-        yield "Gemini API key not set."
+        raise LLMUnavailable("gemini key missing")
+    try:
+        response = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY
+            },
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            stream=True,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
+        )
+    except requests.RequestException as e:
+        logger.warning("gemini request failed: %s", type(e).__name__)
+        raise LLMUnavailable("gemini unreachable") from None
+
+    with response:
+        if response.status_code != 200:
+            logger.warning("gemini returned status %s", response.status_code)
+            raise LLMUnavailable("gemini bad status")
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    parts = json.loads(line[6:])["candidates"][0]["content"]["parts"]
+                except (ValueError, KeyError, IndexError):
+                    continue
+                text = "".join(p.get("text", "") for p in parts)
+                if text:
+                    yield text
+        except requests.RequestException as e:
+            logger.warning("gemini stream interrupted: %s", type(e).__name__)
+            raise LLMUnavailable("gemini stream interrupted") from None
+
+
+PROVIDERS = {"groq": _stream_groq, "gemini": _stream_gemini}
+
+
+# --- MAIN ROUTER (AUTO-SELECTS MODEL, FALLS BACK AUTOMATICALLY) ---
+def ask_llm_stream(question, context_chunks, mode="auto", info=None):
+    """
+    Stream an answer.
+
+    - mode="auto": non-English questions -> Gemini (strong multilingual),
+      everything else -> Groq (fast). If the chosen provider fails BEFORE
+      sending any text, the other provider is tried automatically.
+    - mode="groq" / "gemini": that provider first, the other as fallback.
+      Any other value (including the removed "ollama") behaves like "groq".
+    - `info` (optional dict) receives {"provider": <provider that actually answered>}.
+    - On total failure raises LLMUnavailable with a user-safe message.
+    """
+    if info is None:
+        info = {}
+
+    if not context_chunks:
+        yield NO_CONTEXT_MESSAGE
         return
 
     prompt = build_prompt(question, context_chunks)
 
-    try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}",
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}]
-            },
-            stream=True,
-            timeout=(5, 30)
-        )
-
-        if response.status_code != 200:
-            yield f"Gemini Error: {response.text}"
-            return
-
-        for line in response.iter_lines():
-            if line:
-                line = line.decode("utf-8")
-                if line.startswith("data: "):
-                    try:
-                        data = json.loads(line[6:])
-                        text = data["candidates"][0]["content"]["parts"][0]["text"]
-                        yield text
-                    except:
-                        continue
-    except Exception as e:
-        yield f"Gemini error: {str(e)}"
-
-# --- MAIN ROUTER (AUTO-SELECTS MODEL) ---
-def ask_llm_stream(question, context_chunks, mode="auto"):
-    """
-    If mode="auto", automatically pick the best model:
-    - Complex questions -> Ollama (local)
-    - Simple English questions -> Groq (fast)
-    - Simple regional language questions -> Gemini (strong multilingual)
-    
-    If mode is explicitly set (manual override), respect it.
-    """
     if mode == "auto":
-        complexity = classify_complexity(question)
         lang_code, _ = detect_language(question)
-
-        if complexity == 'complex':
-            selected_mode = 'ollama'
-        elif lang_code != 'en':
-            selected_mode = 'gemini'
-        else:
-            selected_mode = 'groq'
+        first = "gemini" if lang_code != "en" else "groq"
+    elif mode in PROVIDERS:
+        first = mode
     else:
-        selected_mode = mode
+        first = "groq"
 
-    if selected_mode == "groq":
-        yield from ask_groq_stream(question, context_chunks)
-    elif selected_mode == "gemini":
-        yield from ask_gemini_stream(question, context_chunks)
-    else:
-        yield from ask_ollama_stream(question, context_chunks)
+    order = [first] + [p for p in PROVIDERS if p != first]
+
+    for provider in order:
+        started = False
+        try:
+            for token in PROVIDERS[provider](prompt):
+                if not started:
+                    started = True
+                    info["provider"] = provider
+                yield token
+            if started:
+                return
+        except LLMUnavailable:
+            if started:
+                # Failed halfway: do not mix two models in one answer
+                raise LLMUnavailable(GENERIC_LLM_ERROR) from None
+            continue
+
+    raise LLMUnavailable(GENERIC_LLM_ERROR)
