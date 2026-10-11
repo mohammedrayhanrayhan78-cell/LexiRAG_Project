@@ -1,0 +1,262 @@
+/* ============================================
+ * RETRO DESIGN SYSTEM - LexiRAG
+ * ============================================ */
+
+:root {
+  --ink: #3B1E17;
+  --cream: #FCE8CC;
+  --cream-light: #FFF4E0;
+  --field: #FFF8EC;
+  --red: #C7402B;
+  --orange: #F59A3B;
+  --button-orange: #F7A441;
+  --button-hover: #FFB65C;
+  --yellow: #F7C948;
+  --lilac: #D4A9E0;
+  --pink: #D9A6C8;
+  --peach: #F4C48E;
+  
+  --font-body: 'Space Grotesk', 'Noto Sans Devanagari', 'Noto Sans Kannada', 'Noto Sans Tamil', 'Noto Sans Telugu', sans-serif;
+  --font-display: 'Bricolage Grotesque', var(--font-body);
+  --font-pixel: 'Silkscreen', monospace;
+
+  --border: 2px solid var(--ink);
+  --shadow-win: 5px 5px 0 var(--ink);
+  --shadow-btn: 3px 3px 0 var(--ink);
+  --shadow-chip: 2px 2px 0 var(--ink);
+  --shadow-field-inset: inset 2px 2px 0 rgba(59, 30, 23, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--peach);
+  background-image: radial-gradient(#E8A862 1.5px, transparent 1.5px);
+  background-size: 22px 22px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================
+ * RETRO WINDOW (.win)
+ * ============================================ */
+.win {
+  background: var(--cream);
+  border: var(--border);
+  box-shadow: var(--shadow-win);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--red);
+  border-bottom: var(--border);
+  padding: 8px 12px;
+  color: var(--cream-light);
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.bar.lilac {
+  background: var(--lilac);
+  color: var(--ink);
+}
+
+.bar.amber {
+  background: var(--orange);
+  color: var(--ink);
+}
+
+.bar.red {
+  background: var(--red);
+  color: var(--cream-light);
+}
+
+.tbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tb {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--ink);
+  background: var(--cream);
+}
+
+/* ============================================
+ * RETRO BUTTON (.btn)
+ * ============================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 20px;
+  border: var(--border);
+  background: var(--button-orange);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 14px;
+  text-decoration: none;
+  border-radius: 3px;
+  box-shadow: var(--shadow-btn);
+  cursor: pointer;
+  transition: transform 0.05s ease, box-shadow 0.05s ease, background-color 0.1s ease;
+  user-select: none;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--ink);
+}
+
+.btn:focus-visible {
+  outline: 3px solid var(--orange);
+  outline-offset: 2px;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: var(--shadow-btn) !important;
+}
+
+.btn.alt {
+  background: var(--cream);
+}
+
+.btn.alt:hover:not(:disabled) {
+  background: var(--cream-light);
+}
+
+.btn.danger {
+  background: var(--red);
+  color: var(--cream-light);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #a82e1d;
+}
+
+.btn.sm {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* ============================================
+ * RETRO FIELD (.fld)
+ * ============================================ */
+.fld {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: var(--border);
+  background: var(--field);
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--ink);
+  border-radius: 3px;
+  box-shadow: var(--shadow-field-inset);
+  transition: outline 0.1s ease;
+}
+
+.fld:focus {
+  outline: 3px solid var(--orange);
+  outline-offset: 1px;
+}
+
+.fld::placeholder {
+  color: rgba(59, 30, 23, 0.45);
+}
+
+/* ============================================
+ * CHIPS & CHAT ROWS
+ * ============================================ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 12px;
+  border: var(--border);
+  background: var(--cream-light);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 3px;
+  box-shadow: var(--shadow-chip);
+}
+
+.chip.model {
+  background: var(--yellow);
+}
+
+.chatrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: var(--border);
+  background: var(--cream-light);
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  border-radius: 3px;
+  box-shadow: 2px 2px 0 var(--ink);
+  cursor: pointer;
+  text-align: left;
+  gap: 10px;
+}
+
+.chatrow:hover {
+  background: #fff;
+}
+
+.chatrow.on {
+  background: var(--yellow);
+}
+
+/* ============================================
+ * RESPONSIVENESS & ACCESSIBILITY
+ * ============================================ */
+@media (max-width: 1000px) {
+  .deco {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
