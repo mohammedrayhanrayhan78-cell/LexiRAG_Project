@@ -19,7 +19,7 @@ from db import get_connection, init_schema
 import time
 import threading
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
@@ -236,6 +236,22 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """
+    Security headers middleware:
+    - X-Content-Type-Options: nosniff
+    - Referrer-Policy: no-referrer
+    - Cache-Control: no-store on authenticated JSON responses
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    content_type = response.headers.get("content-type", "")
+    if "authorization" in request.headers and "application/json" in content_type:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 # Initialize database tables on startup
 init_db()
 init_users_table()
@@ -365,6 +381,20 @@ if not SECRET_KEY or len(SECRET_KEY) < 32:
         "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
     )
 
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+
+def create_access_token(username: str) -> str:
+    """Generate a hardened JWT token with sub, username, iat, and exp claims."""
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=JWT_EXPIRE_HOURS)
+    payload = {
+        "sub": username,
+        "username": username,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp())
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
 def verify_token(authorization: Optional[str] = Header(None)) -> str:
     """Verify JWT token and return authenticated username"""
     if not authorization:
@@ -376,8 +406,13 @@ def verify_token(authorization: Optional[str] = Header(None)) -> str:
             raise HTTPException(status_code=401, detail="Invalid authorization format")
         
         token = parts[1]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        username = payload.get("username")
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=["HS256"],
+            options={"require": ["exp", "sub"]}
+        )
+        username = payload.get("sub") or payload.get("username")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token payload")
         return username
@@ -423,14 +458,7 @@ async def signup(request: Request, user: UserSignup):
     auth_limiter.record_attempt(ip_key, window=60)
 
     if create_user(user.username, user.password):
-        token = jwt.encode(
-            {
-                "username": user.username,
-                "exp": datetime.utcnow() + timedelta(days=7)
-            },
-            SECRET_KEY,
-            algorithm="HS256"
-        )
+        token = create_access_token(user.username)
         return {"token": token, "username": user.username}
     else:
         return JSONResponse(
@@ -469,14 +497,7 @@ async def login(request: Request, user: UserLogin):
         auth_limiter.record_attempt(user_key, window=60)
 
     if verify_user(user.username, user.password):
-        token = jwt.encode(
-            {
-                "username": user.username,
-                "exp": datetime.utcnow() + timedelta(days=7)
-            },
-            SECRET_KEY,
-            algorithm="HS256"
-        )
+        token = create_access_token(user.username)
         return {"token": token, "username": user.username}
     else:
         return JSONResponse(
@@ -589,11 +610,11 @@ async def get_chats(username: str, authorization: Optional[str] = Header(None)):
     """
     token_username = verify_token(authorization)
     if token_username != username:
-        return JSONResponse(
+        raise HTTPException(
             status_code=403,
-            content={"detail": "Unauthorized - can only access your own chats"}
+            detail="Forbidden: Cannot access another user's chats"
         )
-    chats = get_user_chats(username)
+    chats = get_user_chats(token_username)
     return {"chats": chats}
 
 @app.post("/chats")

@@ -564,3 +564,97 @@ def test_spoofed_forwarded_for_client_ip():
             assert "Retry-After" in blocked.headers
 
     run_async(_test_rl())
+
+
+def test_jwt_hardening_and_expiry():
+    """Verify JWT claims (sub, iat, exp), algorithm pinning, and refusal of invalid tokens"""
+    import jwt
+    from main import SECRET_KEY, create_access_token, verify_token
+    from fastapi import HTTPException
+
+    # 1. Valid token creation
+    username = "alice_jwt_test"
+    token = create_access_token(username)
+    payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    assert payload["sub"] == username
+    assert payload["username"] == username
+    assert "iat" in payload
+    assert "exp" in payload
+    assert payload["exp"] > payload["iat"]
+
+    # 2. Token verifies correctly
+    auth_header = f"Bearer {token}"
+    assert verify_token(auth_header) == username
+
+    # 3. Token missing 'sub' is rejected
+    no_sub_token = jwt.encode({"username": username, "exp": payload["exp"], "iat": payload["iat"]}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {no_sub_token}")
+    assert exc.value.status_code == 401
+
+    # 4. Token missing 'exp' is rejected
+    no_exp_token = jwt.encode({"sub": username, "iat": payload["iat"]}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {no_exp_token}")
+    assert exc.value.status_code == 401
+
+    # 5. Expired token is rejected
+    expired_token = jwt.encode({"sub": username, "iat": 1000, "exp": 2000}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {expired_token}")
+    assert exc.value.status_code == 401
+    assert "expired" in str(exc.value.detail).lower()
+
+
+def test_security_headers_middleware():
+    """Verify security headers: X-Content-Type-Options nosniff, Referrer-Policy no-referrer, Cache-Control no-store"""
+    async def _test():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            # Unauthenticated health check has nosniff and no-referrer, but not Cache-Control no-store
+            res = await client.get("/healthz")
+            assert res.status_code == 200
+            assert res.headers.get("X-Content-Type-Options") == "nosniff"
+            assert res.headers.get("Referrer-Policy") == "no-referrer"
+            assert res.headers.get("Cache-Control") != "no-store"
+
+            # Authenticated JSON response has Cache-Control: no-store
+            uname, token, headers = await create_test_user(client, "sec_headers")
+            chats_res = await client.get("/chats", headers=headers)
+            assert chats_res.status_code == 200
+            assert chats_res.headers.get("X-Content-Type-Options") == "nosniff"
+            assert chats_res.headers.get("Referrer-Policy") == "no-referrer"
+            assert chats_res.headers.get("Cache-Control") == "no-store"
+
+    run_async(_test())
+
+
+def test_idor_protection_across_endpoints():
+    """Verify IDOR protections across legacy and active routes"""
+    async def _test():
+        auth_limiter.reset()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            user_a, token_a, headers_a = await create_test_user(client, "idor_a")
+            user_b, token_b, headers_b = await create_test_user(client, "idor_b")
+
+            # User A creates a chat
+            chat_res = await client.post("/chats", json={"chat_name": "Private Chat A"}, headers=headers_a)
+            chat_a_id = chat_res.json()["chat_id"]
+
+            # 1. IDOR on GET /chats/{username}: User B cannot request User A's chats
+            leak_res = await client.get(f"/chats/{user_a}", headers=headers_b)
+            assert leak_res.status_code == 403
+
+            # 2. IDOR on POST /ask: User B cannot ask questions in User A's chat
+            ask_res = await client.post("/ask", json={"question": "What is in here?", "chat_id": chat_a_id}, headers=headers_b)
+            assert ask_res.status_code == 403
+
+            # 3. IDOR on DELETE /chats/{chat_id}: User B cannot delete User A's chat
+            del_chat = await client.delete(f"/chats/{chat_a_id}", headers=headers_b)
+            assert del_chat.status_code == 403
+
+            # 4. User A can access their own chat
+            own_chats = await client.get(f"/chats/{user_a}", headers=headers_a)
+            assert own_chats.status_code == 200
+
+    run_async(_test())
+
