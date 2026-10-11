@@ -1,149 +1,134 @@
 # ⚡ LexiRAG
 
-**Offline-capable RAG (Retrieval-Augmented Generation) document chat application** — upload your documents and ask questions in natural language, including regional Indian languages.
+**Cloud-Ready RAG (Retrieval-Augmented Generation) document intelligence platform** — upload documents and ask questions in natural language, with intelligent routing across English and regional Indian languages.
 
 ---
 
 ## 🎯 What is LexiRAG?
 
-LexiRAG lets you upload PDF/TXT documents and have natural conversations with them. It combines local, offline AI with cloud-powered models, automatically choosing the best one for each question — no manual configuration needed.
+LexiRAG lets you upload PDF and TXT documents and have natural, contextual conversations with them. It automatically routes queries between high-performance cloud LLMs:
+- **English queries** → **Groq** (`llama-3.3-70b-versatile`) for sub-second responses.
+- **Regional language queries** → **Google Gemini** (`gemini-2.5-flash`) for nuanced multilingual comprehension (Hindi, Kannada, Tamil, Telugu).
+- **Automatic Fallback** → If the primary provider experiences downtime or rate limits, requests fail over seamlessly without mixing responses.
+
+---
+
+## 🔒 Privacy Notice
+
+**Honest Privacy Note:**
+LexiRAG does NOT store your uploaded files on disk. Documents are parsed in-memory into text chunks and vector embeddings, and the raw files are immediately discarded. However, to generate answers to your queries, **relevant document text snippets and your question are transmitted to third-party cloud LLM providers (Groq or Google Gemini)**. Do not upload confidential or sensitive personal data that should not be processed by third-party AI APIs.
 
 ---
 
 ## ✨ Key Features
 
-- **🔀 Multi-LLM Auto-Routing** — The system automatically selects the right model per question:
-  - Simple queries → **Groq** (llama-3.3-70b, fast) for English, **Gemini** for regional languages
-  - Complex, multi-part queries → **Ollama** (Gemma 2B, runs 100% locally/offline)
-- **🌐 Regional Language Support** — Hindi, Kannada, Tamil, Telugu, and English, auto-detected
-- **📄 Smart PDF Processing** — Text extraction via `pdfplumber`, with automatic OCR fallback (`pytesseract`) for scanned/image-based PDFs
-- **🔒 Chat-Scoped Document Isolation** — Documents and conversations are isolated per chat and per user
-- **⚡ Streaming Responses** — Token-by-token streaming via Server-Sent Events (SSE)
-- **📚 Source Citations** — Every answer references the exact document it came from
-- **📝 Structured Answers** — Responses are formatted with markdown (bullet points, bold, headings) for readability, rendered via `react-markdown`
-- **💾 Session Persistence** — Active chat stays open across page refreshes
-- **🎨 Clean, Dark, Responsive, Full-Width UI** — Built with React + Vite
-
----
-
-## 🔒 Security
-
-LexiRAG went through a 10-point security audit and hardening pass:
-
-| Protection | Implementation |
-|---|---|
-| Rate Limiting | `slowapi` + **Redis-backed storage** — 5/min on login & signup, 20/hour on upload, ask, and chat creation (persists across server restarts) |
-| XSS Prevention | Backend sanitization (`html.escape`) on all user-supplied chat names |
-| Auth | JWT-based, 7-day expiry, with graceful `401` handling (no server crashes on expired tokens) |
-| Password Storage | `passlib` with `pbkdf2_sha256` hashing (no Rust dependency, Windows-friendly) |
-| SQL Injection | Fully parameterized queries |
-| CSRF / Path Traversal | Blocked via CORS policy and route validation |
-| API Key Management | `.env` file (git-ignored), never hardcoded |
-| Corrupted File Handling | Uploads that fail extraction return a clean `400` error instead of crashing the server |
+- **🔀 Smart LLM Auto-Routing** — Groq for lightning-fast English retrieval; Gemini for regional Indic languages; automatic resilient failover.
+- **🌐 Regional Language Support** — Hindi, Kannada, Tamil, Telugu, and English with automatic language detection.
+- **📄 Smart Document Processing** — In-memory PDF extraction (`pdfplumber`) with OCR fallback (`pytesseract`) for scanned pages, plus UTF-8 TXT support.
+- **💾 Cloud Persistence & Portability** — Centralized database abstraction (`db.py`) supporting Neon PostgreSQL in production and local SQLite for development.
+- **🔒 Chat & User Isolation** — Strict ownership checks across all chats, documents, and queries. Full data deletion on account removal.
+- **🛡️ Hardened Security** — Rate-limited auth (5/min per IP and username with `Retry-After`), spoof-proof client IP resolution via `TRUSTED_PROXY_HOPS`, JWT authentication with timezone-aware expiration and claim validation, and security headers (`nosniff`, `no-referrer`, `no-store`).
+- **⚡ Fast Vectorized Retrieval** — Stacked `float32` matrix multiplication and `numpy.argpartition` for accelerated top-k chunk ranking.
+- **📡 Streaming Responses** — Real-time Server-Sent Events (SSE) streaming with active provider attribution and source file citations.
 
 ---
 
 ## 🛠️ Tech Stack
 
-**Backend:** FastAPI · SQLite · pdfplumber · pytesseract (OCR) · sentence-transformers (`all-MiniLM-L6-v2`) · JWT · slowapi · Redis
+**Backend:**
+- FastAPI · Pydantic · PyJWT · passlib (PBKDF2)
+- psycopg 3 (`psycopg_pool`) for PostgreSQL / Neon
+- SQLite (local development fallback)
+- fastembed (`all-MiniLM-L6-v2` ONNX) · NumPy
+- pdfplumber · pytesseract (OCR) · langdetect
+- slowapi (Redis or thread-safe in-memory sliding window)
 
-**Frontend:** React (Vite) · Axios · react-markdown
+**Frontend:**
+- React (Vite) · react-markdown · Self-hosted typography
 
-**LLMs:**
-- 🦙 **Ollama** (Gemma 2B) — local, offline, privacy-first
-- ⚡ **Groq** (llama-3.3-70b-versatile) — fast cloud inference
-- ✨ **Gemini** (2.5-flash) — strong multilingual support
-
----
-
-## 🏗️ Architecture
----
-```
-User → React (built as static files) served directly by FastAPI on one port
-                              ↓
-                        FastAPI Backend → SQLite (chunks/chats/users)
-                              ↓
-                  Auto-Router (complexity + language)
-                    ↓          ↓           ↓
-                 Ollama      Groq       Gemini
-                (local)    (cloud)     (cloud)
-```
-
-> Frontend and backend are served from a single port — the React app is built (`npm run build`) and mounted as static files by FastAPI, so only one deployment target / tunnel is needed.
+**Cloud Providers:**
+- Groq Cloud API
+- Google Gemini API
+- Neon Serverless PostgreSQL
+- Render Cloud Platform
 
 ---
 
-## 📁 Project Structure
+## ☁️ Deployment Architecture (Render)
 
-```
-LexiRAG_Project/
-├── main.py              # FastAPI app, routes, auth, static file mount
-├── database.py           # SQLite operations, password hashing
-├── embeddings.py          # sentence-transformers, language detection
-├── rag.py                 # RAG pipeline, LLM routing, prompts
-├── requirements.txt
-├── .env                   # API keys (git-ignored)
-└── lexirag-react/          # React frontend (Vite)
-    ├── src/
-    │   ├── pages/          # Chat.jsx, Login.jsx, Signup.jsx
-    │   └── styles/
-    └── dist/                # Production build (git-ignored, generated)
-```
+LexiRAG is deployed on Render as two decoupled services defined in `render.yaml`:
 
-## 🚀 Getting Started
+1. **`lexirag-api` (Docker Web Service)**:
+   - Runs the FastAPI application inside a container with Python 3.11 and Tesseract OCR language packs.
+   - Connects to Neon PostgreSQL via `DATABASE_URL` with connection pooling (`sslmode=require`, `prepare_threshold=None`).
+   - Health check endpoint: `/healthz`.
 
-### Backend
+2. **`lexirag-web` (Static Site)**:
+   - Hosts the compiled React/Vite single-page application from `lexirag-react/`.
+   - Communicates with `lexirag-api` via `VITE_API_URL`.
+   - Protected with Content-Security-Policy and modern security headers.
+
+> ⏱️ **Free-Tier Cold Starts:**
+> Render's free tier spins down inactive web services after 15 minutes of inactivity. When a request arrives after spin-down, the backend takes approximately **30 to 50 seconds** to wake up. The frontend automatically pings `/healthz` on load with retry and exponential backoff to wake the service cleanly.
+
+---
+
+## ⚙️ Environment Variables
+
+Configure the following environment variable names (never commit secrets to Git):
+
+### Backend (`lexirag-api` / `.env`)
+| Variable Name | Required | Description |
+|---|---|---|
+| `JWT_SECRET_KEY` | **Yes** | Cryptographic secret for signing JWTs (32+ characters) |
+| `DATABASE_URL` | **Yes (Prod)** | Neon PostgreSQL connection URI (`postgresql://...`) |
+| `GROQ_API_KEY` | **Yes** | Groq Cloud API key for English queries |
+| `GEMINI_API_KEY` | **Yes** | Google Gemini API key for regional queries |
+| `ALLOWED_ORIGINS` | **Yes (Prod)** | Comma-separated allowed frontend origins |
+| `ENV` | No | Set to `prod` in production (disables `/docs` and OpenAPI) |
+| `DATABASE_PATH` | No | Local SQLite database file path (default `lexirag.db`) |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse proxy hops (default `1` for Render) |
+| `JWT_EXPIRE_HOURS` | No | Token expiration duration in hours (default `24`) |
+| `REDIS_URL` | No | Optional Redis connection string for persistent rate limiting |
+| `TESSERACT_CMD` | No | Path to Tesseract binary (Windows local dev only) |
+| `OCR_LANGS` | No | Tesseract languages (default `eng+hin+kan+tam+tel`) |
+
+### Frontend (`lexirag-web` / `.env`)
+| Variable Name | Required | Description |
+|---|---|---|
+| `VITE_API_URL` | **Yes** | Public URL of the backend API (e.g. `https://lexirag-api.onrender.com`) |
+
+---
+
+## 🚀 Local Development
+
+### 1. Backend Setup
 ```bash
-# Activate virtual environment
-venv\Scripts\activate
-
 # Install dependencies
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# Add API keys to .env
-GROQ_API_KEY=your_key_here
-GEMINI_API_KEY=your_key_here
-REDIS_URL=your_redis_connection_string
+# Configure environment
+cp .env.example .env
+# Fill in JWT_SECRET_KEY, GROQ_API_KEY, GEMINI_API_KEY in .env
 
-# Run server
-uvicorn main:app --reload
+# Run database tests
+python -m pytest -q
+
+# Start FastAPI server
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### Frontend
+### 2. Frontend Setup
 ```bash
 cd lexirag-react
 npm install
-npm run build      # generates dist/, served automatically by FastAPI at localhost:8000
+npm run dev
 ```
-
-### Ollama (for offline mode)
-```bash
-ollama serve
-ollama pull gemma2:2b
-```
-
----
-
-## 📌 Known Limitations
-
-- Gemini free-tier quota is limited
-- Groq models are periodically deprecated by the provider — verify model name at [console.groq.com](https://console.groq.com/docs/deprecations)
-- Document upload/embedding generation is CPU-bound; very large PDFs may take noticeably longer
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Deploy backend to Azure for Students
-- [ ] CI/CD pipeline (GitHub Actions → Azure)
-- [ ] Background job queue (Redis + task queue) for non-blocking document processing
-- [ ] Multiple file upload in one go
-- [ ] Self-hosted Ollama on Raspberry Pi / Orange Pi
 
 ---
 
 ## 👤 Author
 
-**Mohammed Rayhan** — B.Tech CSE, REVA University, Bengaluru
-
-[GitHub](https://github.com/mohammedrayhanrayhan78-cell/LexiRAG_Project)
+**Mohammed Rayhan** — B.Tech CSE, REVA University, Bengaluru  
+[GitHub Repository](https://github.com/mohammedrayhanrayhan78-cell/LexiRAG_Project)

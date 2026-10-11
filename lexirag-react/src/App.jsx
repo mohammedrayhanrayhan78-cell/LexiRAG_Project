@@ -1,42 +1,98 @@
-import { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import Chat from './pages/Chat';
+import { getToken, clearToken, onAuthExpired, isAuthenticated, pingHealth } from './api';
 import './App.css';
 
-export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('token'));
-  const [currentPage, setCurrentPage] = useState('login');
+// Route guard requiring valid authentication
+function AuthGuard({ children }) {
+  const authed = isAuthenticated();
+  const location = useLocation();
+
+  if (!authed) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+// Redirects logged-in users away from auth pages
+function GuestGuard({ children }) {
+  const authed = isAuthenticated();
+  if (authed) {
+    return <Navigate to="/chat" replace />;
+  }
+  return children;
+}
+
+function AppRoutes() {
+  const navigate = useNavigate();
+  const [sessionExpiredMsg, setSessionExpiredMsg] = useState('');
 
   useEffect(() => {
-    const savedToken = localStorage.getItem('token');
-    if (savedToken) {
-      setToken(savedToken);
-      setCurrentPage('chat');
-    }
-  }, []);
+    // Wake up backend in background on initial load
+    pingHealth();
 
-  const handleLogin = (newToken) => {
-    setToken(newToken);
-    localStorage.setItem('token', newToken);
-    setCurrentPage('chat');
-  };
+    // Listen for any 401 unauthenticated response across the app
+    const unsubscribe = onAuthExpired(() => {
+      setSessionExpiredMsg('Session expired. Please log in again.');
+      navigate('/login', { replace: true });
+    });
 
-  const handleLogout = () => {
-    setToken(null);
-    localStorage.removeItem('token');
-    setCurrentPage('login');
-  };
+    return unsubscribe;
+  }, [navigate]);
 
-  if (currentPage === 'login') {
-    return <Login onLoginSuccess={handleLogin} onSwitchToSignup={() => setCurrentPage('signup')} />;
-  }
-
-  if (currentPage === 'signup') {
-    return <Signup onSignupSuccess={handleLogin} onSwitchToLogin={() => setCurrentPage('login')} />;
-  }
-
-  if (currentPage === 'chat') {
-    return <Chat onLogout={handleLogout} username={localStorage.getItem('username') || 'user'} />;
+  return (
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          <GuestGuard>
+            <Login
+              sessionExpiredMsg={sessionExpiredMsg}
+              onClearExpiredMsg={() => setSessionExpiredMsg('')}
+            />
+          </GuestGuard>
+        }
+      />
+      <Route
+        path="/signup"
+        element={
+          <GuestGuard>
+            <Signup />
+          </GuestGuard>
+        }
+      />
+      <Route
+        path="/chat"
+        element={
+          <AuthGuard>
+            <Chat />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/chat/:chatId"
+        element={
+          <AuthGuard>
+            <Chat />
+          </AuthGuard>
+        }
+      />
+      {/* Fallback redirect */}
+      <Route
+        path="*"
+        element={<Navigate to={isAuthenticated() ? "/chat" : "/login"} replace />}
+      />
+    </Routes>
+  );
 }
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
+  );
 }

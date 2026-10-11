@@ -27,7 +27,7 @@ import pytest
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-not-for-production-0123456789")
 
 from main import app, auth_limiter, MAX_FILE_SIZE
-from database import DB_PATH
+from db import get_connection, DB_PATH
 
 def run_async(coro):
     return asyncio.run(coro)
@@ -324,7 +324,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             assert upload_res.json()["chunks"] > 0
 
             # Verify chunks exist in DB
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ?", (chat_id,))
             chunk_count_before = cur.fetchone()[0]
@@ -361,7 +361,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             a_del_doc = await client.delete(f"/chats/{chat_id}/documents/{doc_name}", headers=headers_a)
             assert a_del_doc.status_code == 200
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ? AND doc_name = ?", (chat_id, doc_name))
             assert cur.fetchone()[0] == 0
@@ -380,7 +380,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             assert del_chat_res.status_code == 200
             assert del_chat_res.json()["status"] == "deleted"
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ?", (chat_id,))
             assert cur.fetchone()[0] == 0, "Chunks were not deleted when chat was deleted!"
@@ -413,7 +413,7 @@ def test_delete_account_and_all_data():
             assert del_res.json()["status"] == "deleted"
 
             # Verify complete database cleanup
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM users WHERE username = ?", (uname,))
             assert cur.fetchone()[0] == 0
@@ -513,3 +513,189 @@ def test_streaming_wire_format_metadata_and_error_handling():
                 main.ask_llm_stream = original_ask
 
     run_async(_test())
+
+
+def test_spoofed_forwarded_for_client_ip():
+    """Prove that spoofed leading X-Forwarded-For entries do NOT alter the client IP or bypass rate limits"""
+    from starlette.requests import Request
+    from main import get_client_ip, auth_limiter
+
+    # 1. Direct get_client_ip test with Starlette Request scope
+    scope_client = ("127.0.0.1", 12345)
+    
+    # Legitimate single hop from proxy
+    req1 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req1) == "198.51.100.1"
+
+    # Attacker prepends fake IP 203.0.113.195
+    req2 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"203.0.113.195, 198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req2) == "198.51.100.1", "Spoofed leading IP must not change client IP!"
+
+    # Attacker prepends another fake IP 8.8.8.8
+    req3 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"8.8.8.8, 198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req3) == "198.51.100.1", "Spoofed leading IP must not change client IP!"
+
+    # Fallback to direct client host when header missing
+    req_no_header = Request({"type": "http", "headers": [], "client": ("192.168.1.50", 12345)})
+    assert get_client_ip(req_no_header) == "192.168.1.50"
+
+    # 2. Integration test: 5 signup attempts with varying spoofed headers from the SAME real edge IP get rate limited
+    async def _test_rl():
+        auth_limiter.reset()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            real_proxy_ip = "198.51.100.77"
+            for i in range(5):
+                spoofed_header = f"fake.{i}.0.1, {real_proxy_ip}"
+                res = await client.post(
+                    "/signup",
+                    json={"username": f"user_spoof_{i}_{uuid.uuid4().hex[:6]}", "password": "password123"},
+                    headers={"X-Forwarded-For": spoofed_header}
+                )
+                assert res.status_code == 200, f"Attempt {i+1} failed: {res.text}"
+
+            # 6th attempt with yet another spoofed leading IP must be blocked with 429
+            sixth_spoofed_header = f"attacker.ip.99.99, {real_proxy_ip}"
+            blocked = await client.post(
+                "/signup",
+                json={"username": f"user_spoof_blocked_{uuid.uuid4().hex[:6]}", "password": "password123"},
+                headers={"X-Forwarded-For": sixth_spoofed_header}
+            )
+            assert blocked.status_code == 429, "Attacker bypassed rate limit by changing spoofed leading XFF!"
+            assert "Retry-After" in blocked.headers
+
+    run_async(_test_rl())
+
+
+def test_jwt_hardening_and_expiry():
+    """Verify JWT claims (sub, iat, exp), algorithm pinning, and refusal of invalid tokens"""
+    import jwt
+    from main import SECRET_KEY, create_access_token, verify_token
+    from fastapi import HTTPException
+
+    # 1. Valid token creation
+    username = "alice_jwt_test"
+    token = create_access_token(username)
+    payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    assert payload["sub"] == username
+    assert payload["username"] == username
+    assert "iat" in payload
+    assert "exp" in payload
+    assert payload["exp"] > payload["iat"]
+
+    # 2. Token verifies correctly
+    auth_header = f"Bearer {token}"
+    assert verify_token(auth_header) == username
+
+    # 3. Token missing 'sub' is rejected
+    no_sub_token = jwt.encode({"username": username, "exp": payload["exp"], "iat": payload["iat"]}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {no_sub_token}")
+    assert exc.value.status_code == 401
+
+    # 4. Token missing 'exp' is rejected
+    no_exp_token = jwt.encode({"sub": username, "iat": payload["iat"]}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {no_exp_token}")
+    assert exc.value.status_code == 401
+
+    # 5. Expired token is rejected
+    expired_token = jwt.encode({"sub": username, "iat": 1000, "exp": 2000}, SECRET_KEY, algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        verify_token(f"Bearer {expired_token}")
+    assert exc.value.status_code == 401
+    assert "expired" in str(exc.value.detail).lower()
+
+
+def test_security_headers_middleware():
+    """Verify security headers: X-Content-Type-Options nosniff, Referrer-Policy no-referrer, Cache-Control no-store"""
+    async def _test():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            # Unauthenticated health check has nosniff and no-referrer, but not Cache-Control no-store
+            res = await client.get("/healthz")
+            assert res.status_code == 200
+            assert res.headers.get("X-Content-Type-Options") == "nosniff"
+            assert res.headers.get("Referrer-Policy") == "no-referrer"
+            assert res.headers.get("Cache-Control") != "no-store"
+
+            # Authenticated JSON response has Cache-Control: no-store
+            uname, token, headers = await create_test_user(client, "sec_headers")
+            chats_res = await client.get("/chats", headers=headers)
+            assert chats_res.status_code == 200
+            assert chats_res.headers.get("X-Content-Type-Options") == "nosniff"
+            assert chats_res.headers.get("Referrer-Policy") == "no-referrer"
+            assert chats_res.headers.get("Cache-Control") == "no-store"
+
+    run_async(_test())
+
+
+def test_idor_protection_across_endpoints():
+    """Verify IDOR protections across legacy and active routes"""
+    async def _test():
+        auth_limiter.reset()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            user_a, token_a, headers_a = await create_test_user(client, "idor_a")
+            user_b, token_b, headers_b = await create_test_user(client, "idor_b")
+
+            # User A creates a chat
+            chat_res = await client.post("/chats", json={"chat_name": "Private Chat A"}, headers=headers_a)
+            chat_a_id = chat_res.json()["chat_id"]
+
+            # 1. IDOR on GET /chats/{username}: User B cannot request User A's chats
+            leak_res = await client.get(f"/chats/{user_a}", headers=headers_b)
+            assert leak_res.status_code == 403
+
+            # 2. IDOR on POST /ask: User B cannot ask questions in User A's chat
+            ask_res = await client.post("/ask", json={"question": "What is in here?", "chat_id": chat_a_id}, headers=headers_b)
+            assert ask_res.status_code == 403
+
+            # 3. IDOR on DELETE /chats/{chat_id}: User B cannot delete User A's chat
+            del_chat = await client.delete(f"/chats/{chat_a_id}", headers=headers_b)
+            assert del_chat.status_code == 403
+
+            # 4. User A can access their own chat
+            own_chats = await client.get(f"/chats/{user_a}", headers=headers_a)
+            assert own_chats.status_code == 200
+
+    run_async(_test())
+
+
+def test_vectorized_retrieval_ranking_matches_legacy():
+    """Verify that vectorized retrieval with matrix product and argpartition matches legacy scoring order exactly"""
+    import numpy as np
+    import json
+    from main import rank_chunks_vectorized
+
+    np.random.seed(1337)
+    dim = 384
+    q_vec = np.random.randn(dim).astype(np.float32)
+
+    sample_rows = []
+    legacy_chunks = []
+    for i in range(35):
+        emb = np.random.randn(dim).astype(np.float32)
+        doc_name = f"doc_{i}.txt"
+        chunk_text = f"Sample chunk text content number {i}"
+        sample_rows.append((doc_name, chunk_text, json.dumps(emb.tolist())))
+
+        # Legacy calculation: per-row loop and np.dot
+        sim = float(np.dot(q_vec, emb))
+        legacy_chunks.append({
+            "doc_name": doc_name,
+            "chunk_text": chunk_text,
+            "similarity": sim
+        })
+
+    # Legacy top 5
+    legacy_top5 = sorted(legacy_chunks, key=lambda x: x["similarity"], reverse=True)[:5]
+
+    # Vectorized top 5
+    vectorized_top5 = rank_chunks_vectorized(sample_rows, q_vec, top_k=5)
+
+    assert len(vectorized_top5) == 5
+    assert [c["doc_name"] for c in vectorized_top5] == [c["doc_name"] for c in legacy_top5]
+    for vec_chunk, leg_chunk in zip(vectorized_top5, legacy_top5):
+        assert vec_chunk["doc_name"] == leg_chunk["doc_name"]
+        assert vec_chunk["chunk_text"] == leg_chunk["chunk_text"]
+        assert np.isclose(vec_chunk["similarity"], leg_chunk["similarity"], atol=1e-5)
+
+

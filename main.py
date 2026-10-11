@@ -15,11 +15,11 @@ import html
 import io
 import os
 import json
-import sqlite3
+from db import get_connection, init_schema
 import time
 import threading
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
@@ -156,11 +156,25 @@ class AuthRateLimiter:
 REDIS_URL = os.getenv("REDIS_URL")
 auth_limiter = AuthRateLimiter(REDIS_URL)
 
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+
 def get_client_ip(request: Request) -> str:
-    """Extract client IP from headers (proxy/ngrok friendly) or direct connection"""
+    """
+    Extract client IP safely against IP spoofing behind reverse proxies.
+    
+    Render Proxy Architecture & Reasoning:
+    On Render, inbound traffic passes through Render's reverse proxy / load balancer,
+    which appends the connecting client's IP to the right side of the X-Forwarded-For header.
+    Any IP address prepended by the incoming client cannot be trusted.
+    By reading from the right side at index -TRUSTED_PROXY_HOPS (default 1),
+    we inspect the IP address appended by our trusted edge proxy and ignore any client-prepended values.
+    If X-Forwarded-For contains fewer entries than TRUSTED_PROXY_HOPS, we fall back to request.client.host.
+    """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if len(parts) >= TRUSTED_PROXY_HOPS:
+            return parts[-TRUSTED_PROXY_HOPS]
     if request.client and request.client.host:
         return request.client.host
     return "127.0.0.1"
@@ -176,7 +190,7 @@ app = FastAPI(
     openapi_url=None if IS_PROD else "/openapi.json",
 )
 
-# SlowAPI Limiter for other general routes
+# SlowAPI Limiter for other general routes (uses safe get_client_ip key_func)
 def init_slowapi_limiter():
     storage_uri = "memory://"
     if REDIS_URL:
@@ -187,7 +201,7 @@ def init_slowapi_limiter():
             storage_uri = REDIS_URL
         except Exception:
             storage_uri = "memory://"
-    return Limiter(key_func=get_remote_address, storage_uri=storage_uri, headers_enabled=False)
+    return Limiter(key_func=get_client_ip, storage_uri=storage_uri, headers_enabled=False)
 
 limiter = init_slowapi_limiter()
 app.state.limiter = limiter
@@ -222,34 +236,29 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """
+    Security headers middleware:
+    - X-Content-Type-Options: nosniff
+    - Referrer-Policy: no-referrer
+    - Cache-Control: no-store on authenticated JSON responses
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    content_type = response.headers.get("content-type", "")
+    if "authorization" in request.headers and "application/json" in content_type:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 # Initialize database tables on startup
 init_db()
 init_users_table()
 
 def init_chat_tables():
     """Create chat and message tables on startup"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            chat_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(username) REFERENCES users(username)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            role TEXT,
-            content TEXT,
-            FOREIGN KEY(chat_id) REFERENCES chat_sessions(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    init_schema()
 
 init_chat_tables()
 
@@ -372,6 +381,20 @@ if not SECRET_KEY or len(SECRET_KEY) < 32:
         "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
     )
 
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+
+def create_access_token(username: str) -> str:
+    """Generate a hardened JWT token with sub, username, iat, and exp claims."""
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=JWT_EXPIRE_HOURS)
+    payload = {
+        "sub": username,
+        "username": username,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp())
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
 def verify_token(authorization: Optional[str] = Header(None)) -> str:
     """Verify JWT token and return authenticated username"""
     if not authorization:
@@ -383,8 +406,13 @@ def verify_token(authorization: Optional[str] = Header(None)) -> str:
             raise HTTPException(status_code=401, detail="Invalid authorization format")
         
         token = parts[1]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        username = payload.get("username")
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=["HS256"],
+            options={"require": ["exp", "sub"]}
+        )
+        username = payload.get("sub") or payload.get("username")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token payload")
         return username
@@ -430,14 +458,7 @@ async def signup(request: Request, user: UserSignup):
     auth_limiter.record_attempt(ip_key, window=60)
 
     if create_user(user.username, user.password):
-        token = jwt.encode(
-            {
-                "username": user.username,
-                "exp": datetime.utcnow() + timedelta(days=7)
-            },
-            SECRET_KEY,
-            algorithm="HS256"
-        )
+        token = create_access_token(user.username)
         return {"token": token, "username": user.username}
     else:
         return JSONResponse(
@@ -476,14 +497,7 @@ async def login(request: Request, user: UserLogin):
         auth_limiter.record_attempt(user_key, window=60)
 
     if verify_user(user.username, user.password):
-        token = jwt.encode(
-            {
-                "username": user.username,
-                "exp": datetime.utcnow() + timedelta(days=7)
-            },
-            SECRET_KEY,
-            algorithm="HS256"
-        )
+        token = create_access_token(user.username)
         return {"token": token, "username": user.username}
     else:
         return JSONResponse(
@@ -596,12 +610,17 @@ async def get_chats(username: str, authorization: Optional[str] = Header(None)):
     """
     token_username = verify_token(authorization)
     if token_username != username:
-        return JSONResponse(
+        raise HTTPException(
             status_code=403,
-            content={"detail": "Unauthorized - can only access your own chats"}
+            detail="Forbidden: Cannot access another user's chats"
         )
-    chats = get_user_chats(username)
+    chats = get_user_chats(token_username)
     return {"chats": chats}
+
+def _clean_chat_name(raw, default):
+    name = raw.strip() if isinstance(raw, str) else ""
+    return name[:100] or default
+
 
 @app.post("/chats")
 @app.post("/chats/new")
@@ -612,8 +631,8 @@ async def create_chat(request: Request, payload: dict, authorization: Optional[s
     Create new chat for authenticated user.
     """
     username = verify_token(authorization)
-    chat_name = payload.get("chat_name", "New Chat")
-    chat_name = html.escape(chat_name)
+    chat_name = _clean_chat_name(payload.get("chat_name"), "New Chat")
+    # stored raw: React escapes on render
     chat_id = create_new_chat(username, chat_name)
     return {
         "chat_id": chat_id,
@@ -663,9 +682,9 @@ async def rename_chat(
     """Rename a chat (with ownership check)"""
     username = verify_token(authorization)
     verify_chat_ownership(chat_id, username)
-    chat_name = payload.get("chat_name", "Chat")
-    chat_name = html.escape(chat_name)
-    conn = sqlite3.connect(DB_PATH)
+    chat_name = _clean_chat_name(payload.get("chat_name"), "Chat")
+    # stored raw: React escapes on render
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE chat_sessions SET chat_name = ? WHERE id = ?", (chat_name, chat_id))
     conn.commit()
@@ -697,6 +716,47 @@ async def delete_my_account(authorization: Optional[str] = Header(None)):
 # ============================================
 # 11. ENDPOINTS - RAG STREAMING (POST /ask)
 # ============================================
+
+def rank_chunks_vectorized(rows, query_embedding, top_k=5):
+    """
+    Ranks chunks using vectorized matrix-vector multiplication and argpartition.
+    - Stacks valid chunk embeddings into a single float32 matrix
+    - Scores via single matrix-vector product
+    - Selects top k with argpartition and sorts top k descending
+    """
+    valid_chunks = []
+    vectors = []
+    for row in rows:
+        try:
+            emb = json.loads(row[2])
+            vectors.append(emb)
+            valid_chunks.append({
+                "doc_name": row[0],
+                "chunk_text": row[1]
+            })
+        except Exception:
+            pass
+
+    if not valid_chunks:
+        return []
+
+    matrix = np.asarray(vectors, dtype=np.float32)
+    q_vec = np.asarray(query_embedding, dtype=np.float32)
+    scores = matrix @ q_vec
+
+    k = min(top_k, len(scores))
+    if len(scores) <= top_k:
+        top_indices = np.argsort(-scores)
+    else:
+        partition_idx = np.argpartition(-scores, k)[:k]
+        top_indices = partition_idx[np.argsort(-scores[partition_idx])]
+
+    ranked = []
+    for idx in top_indices:
+        chunk = dict(valid_chunks[idx])
+        chunk["similarity"] = float(scores[idx])
+        ranked.append(chunk)
+    return ranked
 
 @app.post("/ask")
 @limiter.limit("20/hour")
@@ -747,7 +807,7 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
     query_embedding = get_embedding(question)
 
     # Fetch chunks from THIS chat only
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT doc_name, chunk_text, embedding FROM chunks WHERE chat_id = ?",
@@ -756,25 +816,7 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
     rows = cursor.fetchall()
     conn.close()
 
-    relevant_chunks = []
-    for row in rows:
-        try:
-            emb = np.array(json.loads(row[2]))
-            similarity = np.dot(query_embedding, emb)
-            relevant_chunks.append({
-                "doc_name": row[0],
-                "chunk_text": row[1],
-                "similarity": similarity
-            })
-        except Exception:
-            pass
-
-    relevant_chunks = sorted(
-        relevant_chunks,
-        key=lambda x: x['similarity'],
-        reverse=True
-    )[:5]
-
+    relevant_chunks = rank_chunks_vectorized(rows, query_embedding, top_k=5)
     sources = list(dict.fromkeys([c["doc_name"] for c in relevant_chunks]))
 
     def stream():

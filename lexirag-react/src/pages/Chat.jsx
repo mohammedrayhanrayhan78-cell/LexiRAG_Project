@@ -1,722 +1,920 @@
-import { useState, useEffect } from 'react';
-import axios from 'axios';
-import '../styles/Chat.css';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
+import RetroWindow from '../components/RetroWindow';
+import RetroButton from '../components/RetroButton';
+import RetroField from '../components/RetroField';
+import RetroDialog from '../components/RetroDialog';
+import {
+  BoltIcon,
+  FolderIcon,
+  FileDocIcon,
+  WarningIcon,
+  SparkleIcon
+} from '../components/RetroIcons';
+import {
+  API_BASE,
+  getToken,
+  getUsername,
+  clearToken,
+  fetchChats,
+  createChat,
+  renameChat,
+  deleteChat,
+  fetchMessages,
+  fetchDocuments,
+  uploadDocument,
+  deleteDocument,
+  deleteAccount,
+  pingHealth
+} from '../api';
 
-/**
- * CHAT COMPONENT - Main chat interface
- * 
- * FEATURES:
- * - Multiple chats per user
- * - Upload documents per chat (auto-rename chat to filename)
- * - Ask questions about documents
- * - Switch between LLM modes (Ollama, Groq, Gemini)
- * - All requests include JWT token for security
- * - Gets username from localStorage (set during login)
- * 
- * PROPS:
- * - onLogout: function to call when user logs out
- */
-export default function Chat({ onLogout }) {
-  // ============================================
-  // STATE VARIABLES
-  // ============================================
-  
-  const [documents, setDocuments] = useState([]);  // Docs in current chat
-  const [messages, setMessages] = useState([]);    // Messages in current chat
-  const [question, setQuestion] = useState('');    // User's current input
-  const [loading, setLoading] = useState(false);   // Is LLM responding?
-  const [chats, setChats] = useState([]);          // All chats for user
-  const [currentChatId, setCurrentChatId] = useState(null); // Active chat ID
-  const [chatRenamed, setChatRenamed] = useState({}); // Track if chat was already renamed
-  
-  // API BASE URL - Works on localhost AND ngrok
-  // If you need ngrok: change to 'https://octopus-domestic-clicker.ngrok-free.dev'
-  const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  
-  // ============================================
-  // HELPER - Get username from localStorage
-  // ============================================
-  /**
-   * Get username saved during login
-   * Username is used in GET /chats/{username} request
-   */
-  const getUsername = () => {
-    return localStorage.getItem('username');
-  };
-  
-  // ============================================
-  // HELPER - Get JWT token from localStorage
-  // ============================================
-  /**
-   * Get JWT token saved during login
-   * Token is used in Authorization header for all requests
-   */
-  const getToken = () => {
-    return localStorage.getItem('token');
-  };
-  
-  // ============================================
-  // HELPER - Get Authorization header with token
-  // ============================================
-  /**
-   * Create header object with JWT token
-   * Format: { 'Authorization': 'Bearer {token}' }
-   * This is added to EVERY axios request
-   */
-  const getAuthHeader = () => {
-    const token = getToken();
-    return {
-      'Authorization': `Bearer ${token}`
-    };
-  };
-  
-  // ============================================
-  // HELPER - Extract first word from filename
-  // ============================================
-  /**
-   * Get only the first word of filename
-   * EXAMPLE: "Dr_Kalyana_Kumar_Recommendation_Letter.pdf" → "Dr_Kalyana_Kumar"
-   * This keeps chat names short and readable
-   */
-  const getShortFilename = (filename) => {
-    // Remove file extension first
-    const nameWithoutExt = filename.split('.').slice(0, -1).join('.');
-    
-    // Take only first meaningful part (before underscore or space)
-    // If there are underscores, take everything up to 3rd underscore
-    // This gives us a good balance
-    const parts = nameWithoutExt.split('_');
-    
-    // If filename has underscores, take first 3 parts
-    if (parts.length > 1) {
-      return parts.slice(0, 3).join('_'); // e.g., "Dr_Kalyana_Kumar"
-    }
-    
-    // Otherwise just return the name (or first 30 chars if very long)
-    return nameWithoutExt.substring(0, 30);
-  };
-  
-  // ============================================
-  // EFFECT 1 - Load chats when component mounts
-  // ============================================
-  /**
-   * Runs ONCE when Chat component is created
-   * Loads all chats for the logged-in user
-   */
-  useEffect(() => {
-    loadChats();
-  }, []);
-  
-  // ============================================
-  // EFFECT 2 - Load documents when chat changes
-  // ============================================
-  /**
-   * Runs when currentChatId changes
-   * Fetches list of documents in the selected chat
-   */
-  useEffect(() => {
-    if (currentChatId) {
-      fetchDocuments();
-    }
-  }, [currentChatId]);
-  
-  // ============================================
-  // FUNCTION - Load all chats for current user
-  // ============================================
-  /**
-   * GET /chats/{username}
-   * 
-   * ENDPOINT: Retrieve all chats for logged-in user
-   * SECURITY: Requires JWT token + username must match token's username
-   * RETURNS: Array of chats with id, name, created_at
-   * 
-   * FLOW:
-   * 1. Get username and token from localStorage
-   * 2. Send GET request with token in Authorization header
-   * 3. If successful = update chats state
-   * 4. If fails = log error (user not logged in or token expired)
-   */
-  const loadChats = async () => {
-    try {
-      const token = getToken();
-      const username = getUsername();
-      
-      // Security check: must have both token and username
-      if (!token || !username) {
-        console.error('No token or username. User may not be logged in.');
-        return;
-      }
-      
-      // GET request to fetch chats
-      const res = await axios.get(
-        `${API}/chats/${username}`,
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Update state with chats list
-      // Update state with chats list
-      const chatList = res.data.chats || [];
-      setChats(chatList);
-      
-      // Restore last-open chat after refresh, if it still exists
-      const savedChatId = localStorage.getItem('lastChatId');
-      if (savedChatId && chatList.some(c => c.id === parseInt(savedChatId))) {
-        switchChat(parseInt(savedChatId));
-      }
-    } catch (err) {
-      console.error('Failed to load chats:', err.message);
-      // Don't show alert - just log silently in case token expired
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Create new chat
-  // ============================================
-  /**
-   * POST /chats/new
-   * 
-   * ENDPOINT: Create new chat for logged-in user
-   * SECURITY: Requires JWT token
-   * RETURNS: chat_id (integer) to use for uploads/messages
-   * 
-   * FLOW:
-   * 1. Send POST request with username and chat_name
-   * 2. Backend creates chat in database
-   * 3. Returns chat_id
-   * 4. Set as current chat
-   * 5. Reload chat list
-   */
-  const createNewChat = async () => {
-    // Ask user to confirm before creating new chat
-    if (!window.confirm('Create a new chat?')) return;
-    
-    try {
-      const username = getUsername();
-      
-      if (!username) {
-        alert('Not logged in. Please refresh and login again.');
-        return;
-      }
-      
-      // POST request to create new chat
-      const res = await axios.post(
-        `${API}/chats/new`,
-        {
-          username: username,
-          chat_name: 'New Chat'
-        },
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Set this chat as current
-      setCurrentChatId(res.data.chat_id);
-      localStorage.setItem('lastChatId', res.data.chat_id);  // Remember for refresh
-      setMessages([]); // Clear messages
-      
-      // Track that this chat has NOT been renamed yet
-      setChatRenamed(prev => ({
-        ...prev,
-        [res.data.chat_id]: false
-      }));
-      
-      // Reload chat list to show new chat
-      await loadChats();
-    } catch (err) {
-      console.error('Failed to create chat:', err.message);
-      alert(`Failed to create chat: ${err.message}`);
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Switch to different chat
-  // ============================================
-  /**
-   * GET /chats/{chat_id}/messages
-   * 
-   * ENDPOINT: Retrieve all messages from a specific chat
-   * SECURITY: Requires JWT token (user must be logged in)
-   * RETURNS: Array of messages with role (user/bot) and content
-   * 
-   * FLOW:
-   * 1. Send GET request for chat's messages
-   * 2. Convert message format to match state structure
-   * 3. Update messages state to show in UI
-   */
-  const switchChat = async (chatId) => {
-    try {
-      // GET request to fetch messages for this chat
-      const res = await axios.get(
-        `${API}/chats/${chatId}/messages`,
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Set this as current chat
-      setCurrentChatId(chatId);
-      localStorage.setItem('lastChatId', chatId);  // Remember for refresh
-      
-      // Convert messages: {role, content} -> {type, text}
-      const formattedMessages = res.data.messages.map(m => ({
-        type: m.role,      // "user" or "bot"
-        text: m.content    // actual message text
-      }));
-      
-      setMessages(formattedMessages);
-    } catch (err) {
-      console.error('Failed to load chat messages:', err.message);
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Load documents in current chat
-  // ============================================
-  /**
-   * GET /documents/{chat_id}
-   * 
-   * ENDPOINT: Retrieve all documents uploaded to this chat
-   * SECURITY: Only shows docs from THIS chat (chat isolation)
-   * Returns: Array of document filenames
-   * 
-   * FLOW:
-   * 1. Send GET request with current chat_id
-   * 2. Backend returns list of documents in that chat
-   * 3. Update documents state
-   */
-  const fetchDocuments = async () => {
-    if (!currentChatId) return; // Only run if chat is selected
-    
-    try {
-      // GET request to fetch documents for this chat
-      const res = await axios.get(
-        `${API}/documents/${currentChatId}`,
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Update state with document list
-      setDocuments(res.data.documents || []);
-    } catch (err) {
-      console.error('Failed to load documents:', err.message);
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Handle file selection and upload
-  // ============================================
-  /**
-   * POST /upload
-   * POST /chats/{chat_id}/rename (ONLY on first upload)
-   * 
-   * FLOW:
-   * 1. User selects PDF/TXT file
-   * 2. POST to /upload with chat_id
-   * 3. Backend: Extract text, split chunks, generate embeddings, save to DB
-   * 4. IF this is the first document → POST to /rename to auto-rename chat
-   * 5. Reload documents and chats
-   * 
-   * SECURITY: chat_id ensures documents stay in this chat only
-   * 
-   * SMART RENAME: Only rename on FIRST document upload
-   * Using getShortFilename() to keep chat name short
-   */
-  const handleFileSelect = async (e) => {
-    const file = e.target.files[0];
-    
-    // Validation
-    if (!file) return;
-    if (!currentChatId) {
-      alert('Create a chat first');
-      return;
-    }
-    
-    // Create FormData for file upload
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('chat_id', currentChatId);
-    
-    try {
-      // Step 1: Upload document
-      console.log(`Uploading ${file.name}...`);
-      await axios.post(
-        `${API}/upload`,
-        formData,
-        {
-          headers: {
-            ...getAuthHeader()  // ✅ SEND TOKEN HERE
-          }
-        }
-      );
-      
-      // Clear file input
-      document.getElementById('fileInput').value = '';
-      
-      // Step 2: Reload documents to show the uploaded file
-      await fetchDocuments();
-      
-      // Step 3: Auto-rename chat ONLY on first upload
-      // Check if this chat has already been renamed
-      if (!chatRenamed[currentChatId]) {
-        // Get short filename (first few words only)
-        const shortName = getShortFilename(file.name);
-        
-        await axios.post(
-          `${API}/chats/${currentChatId}/rename`,
-          { chat_name: shortName },
-          {
-            headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-          }
-        );
-        
-        // Mark this chat as renamed (don't rename again)
-        setChatRenamed(prev => ({
-          ...prev,
-          [currentChatId]: true
-        }));
-      }
-      
-      // Step 4: Reload chats to show new name
-      await loadChats();
-      
-      alert('✅ Document added!');
-    } catch (err) {
-      console.error('Upload failed:', err.message);
-      alert(`Upload failed: ${err.message}`);
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Delete entire chat
-  // ============================================
-  /**
-   * DELETE /chats/{chat_id}
-   * 
-   * ENDPOINT: Delete chat and all its messages
-   * SECURITY: Requires JWT token
-   * 
-   * FLOW:
-   * 1. Ask user for confirmation
-   * 2. Send DELETE request
-   * 3. Reload chat list
-   * 4. Clear current chat
-   */
-  const deleteChat = async (chatId, e) => {
-    e.stopPropagation(); // Don't trigger switchChat
-    
-    // Ask user to confirm
-    if (!window.confirm('Delete this chat and all messages?')) return;
-    
-    try {
-      // DELETE request to remove chat
-      await axios.delete(
-        `${API}/chats/${chatId}`,
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Reload chat list
-      await loadChats();
-      
-      // Clear current selection
-      setMessages([]);
-      setCurrentChatId(null);
-      localStorage.removeItem('lastChatId');  // Clear saved chat
-      setDocuments([]);
-    } catch (err) {
-      console.error('Delete failed:', err.message);
-      alert('Failed to delete chat');
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Delete single document
-  // ============================================
-  /**
-   * DELETE /document/{doc_name}
-   * 
-   * ENDPOINT: Delete specific document
-   * SECURITY: Requires JWT token
-   * 
-   * FLOW:
-   * 1. Ask user for confirmation
-   * 2. Send DELETE request with doc_name
-   * 3. Reload documents to show it's gone
-   */
-  const deleteDocument = async (docName) => {
-    if (!window.confirm(`Delete ${docName}?`)) return;
-    
-    try {
-      // DELETE request to remove document
-      await axios.delete(
-        `${API}/document/${encodeURIComponent(docName)}`,
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // Reload documents to show it's deleted
-      await fetchDocuments();
-    } catch (err) {
-      console.error('Delete failed:', err.message);
-      alert('Failed to delete document');
-    }
-  };
-  
-  // ============================================
-  // FUNCTION - Send question to LLM
-  // ============================================
-  /**
-   * POST /ask
-   * POST /chats/{chat_id}/message (x2)
-   * 
-   * RAG PIPELINE:
-   * 1. User types question + presses Send
-   * 2. Save user message to database
-   * 3. Send question to LLM with relevant document chunks
-   * 4. LLM returns answer (streaming, token by token)
-   * 5. Save bot response to database
-   * 
-   * SECURITY: chat_id ensures only docs from THIS chat are searched
-   * 
-   * STREAMING: Response comes as Server-Sent Events (SSE)
-   * Each token arrives in format: data: {type: "token", text: "word"}
-   */
-  const sendQuestion = async () => {
-    // Validation
-    if (!question.trim()) return; // Empty question
-    if (!currentChatId) {
-      alert('Create a chat first');
-      return;
-    }
-    
-    // ---- STEP 1: Add user message to UI immediately ----
-    const userMessage = question;
-    setMessages(prev => [...prev, {
-      type: 'user',
-      text: userMessage
-    }]);
-    
-    // ---- STEP 2: Save user message to database ----
-    try {
-      await axios.post(
-        `${API}/chats/${currentChatId}/message`,
-        {
-          role: 'user',
-          content: userMessage
-        },
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-    } catch (err) {
-      console.error('Failed to save user message:', err.message);
-    }
-    
-    // Clear input for next message
-    setQuestion('');
-    setLoading(true); // Show typing indicator
-    
-    try {
-      // ---- STEP 3: Send question to LLM ----
-      const res = await axios.post(
-        `${API}/ask`,
-        {
-          question: userMessage,
-          chat_id: currentChatId   // Only search docs in this chat
-        },
-        {
-          headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-        }
-      );
-      
-      // ---- STEP 4: Parse streaming response ----
-      // Response format: "data: {json}\ndata: {json}\n..."
-      let fullResponse = '';
-      const text = res.data;
-      const lines = text.split('\n');
-      
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const json = JSON.parse(line.substring(6));
-            if (json.type === 'token') {
-              fullResponse += json.text; // Append token to response
-            }
-          } catch (e) {
-            // Skip malformed JSON lines
-          }
-        }
-      }
-      
-      // ---- STEP 5: Add bot message to UI ----
-      setMessages(prev => [...prev, {
-        type: 'bot',
-        text: fullResponse || 'No response'
-      }]);
-      
-      // ---- STEP 6: Save bot message to database ----
-      try {
-        await axios.post(
-          `${API}/chats/${currentChatId}/message`,
-          {
-            role: 'bot',
-            content: fullResponse || 'No response'
-          },
-          {
-            headers: getAuthHeader()  // ✅ SEND TOKEN HERE
-          }
-        );
-      } catch (err) {
-        console.error('Failed to save bot message:', err.message);
-      }
-    } catch (err) {
-      console.error('Question failed:', err.message);
-      setMessages(prev => [...prev, {
-        type: 'bot',
-        text: `❌ Error: ${err.message}`
-      }]);
-    }
-    
-    setLoading(false); // Hide typing indicator
-  };
-  
-  // ============================================
-  // RENDER
-  // ============================================
+// Safe markdown renderer component (Phase B6)
+const SafeMarkdown = memo(function SafeMarkdown({ content }) {
   return (
-    <div className="chat-container">
-      {/* LEFT SIDEBAR - Documents & AI Mode */}
-      <div className="chat-sidebar-left">
-        <div className="chat-header">
-          <h1>⚡ LexiRAG</h1>
-          <button onClick={onLogout} className="logout-btn">Logout</button>
-        </div>
-        
-        {/* Document Upload */}
-        <h2>Add Sources</h2>
-        <input
-          type="file"
-          id="fileInput"
-          onChange={handleFileSelect}
-          accept=".pdf,.txt"
-          style={{ display: 'none' }}
-        />
-        <button
-          onClick={() => document.getElementById('fileInput').click()}
-          className="upload-btn"
-        >
-          📄 Add Document
-        </button>
-        
-        {/* Document List */}
-        <h2>Documents</h2>
-        <div className="doc-list">
-          {documents.length === 0 ? (
-            <div style={{ fontSize: '12px', color: '#666', padding: '10px' }}>
-              No documents
-            </div>
-          ) : (
-            documents.map((doc) => (
-              <div key={doc} className="doc-item-wrapper">
-                <div className="doc-item">📄 {doc}</div>
-                <button
-                  onClick={() => deleteDocument(doc)}
-                  className="delete-icon-btn"
-                >
-                  🗑️
-                </button>
-              </div>
-            ))
+    <ReactMarkdown
+      components={{
+        a: ({ node, ...props }) => (
+          <a {...props} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--red)', fontWeight: 600 }} />
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+// Memoized message item component (Phase B7)
+const MessageItem = memo(function MessageItem({ msg }) {
+  const isUser = msg.role === 'user';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: isUser ? 'flex-end' : 'flex-start',
+        width: '100%',
+        margin: '6px 0',
+      }}
+    >
+      <div
+        style={{
+          maxWidth: '85%',
+          padding: '12px 16px',
+          background: isUser ? 'var(--yellow)' : 'var(--field)',
+          border: 'var(--border)',
+          borderRadius: '4px',
+          boxShadow: '2px 2px 0 var(--ink)',
+          fontSize: '14px',
+          lineHeight: '1.5',
+          wordBreak: 'break-word',
+        }}
+      >
+        {isUser ? (
+          <div style={{ whiteSpace: 'pre-wrap', fontWeight: 500 }}>{msg.content}</div>
+        ) : (
+          <SafeMarkdown content={msg.content} />
+        )}
+      </div>
+
+      {!isUser && (msg.provider || msg.source || msg.sources) && (
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px', fontSize: '11px', fontWeight: 600 }}>
+          {msg.provider && (
+            <span className="chip model" style={{ textTransform: 'capitalize', minHeight: '22px', padding: '0 8px' }}>
+              {msg.provider}
+            </span>
+          )}
+          {(msg.source || (msg.sources && msg.sources.length > 0)) && (
+            <span style={{ color: 'rgba(59, 30, 23, 0.7)' }}>
+              Source: {msg.source || msg.sources.join(', ')}
+            </span>
           )}
         </div>
+      )}
+    </div>
+  );
+});
+
+export default function Chat() {
+  const navigate = useNavigate();
+  const { chatId: routeChatId } = useParams();
+  const username = getUsername();
+
+  // State
+  const [chats, setChats] = useState([]);
+  const [activeChatId, setActiveChatId] = useState(routeChatId ? parseInt(routeChatId, 10) : null);
+  const [messages, setMessages] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [question, setQuestion] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [detectedLanguage, setDetectedLanguage] = useState('auto-detect');
+  const [backendWakingUp, setBackendWakingUp] = useState(false);
+  const [isOffline, setIsOffline] = useState(typeof navigator !== 'undefined' ? !navigator.onLine : false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Modal dialog states
+  const [dialogState, setDialogState] = useState({ isOpen: false, type: null, target: null, message: '' });
+  const [renameInput, setRenameInput] = useState({ isOpen: false, chatId: null, name: '' });
+
+  const abortControllerRef = useRef(null);
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, loading]);
+
+  // Initial load: wake up backend, fetch chats
+  useEffect(() => {
+    let isMounted = true;
+
+    async function init() {
+      try {
+        const ok = await pingHealth();
+        if (!ok && isMounted) {
+          setBackendWakingUp(true);
+        }
+      } catch {
+        if (isMounted) setBackendWakingUp(true);
+      }
+
+      try {
+        const userChats = await fetchChats();
+        if (!isMounted) return;
+        setChats(userChats);
+        setBackendWakingUp(false);
+
+        if (userChats.length > 0) {
+          const targetId = routeChatId ? parseInt(routeChatId, 10) : userChats[0].id;
+          const found = userChats.find((c) => c.id === targetId) || userChats[0];
+          setActiveChatId(found.id);
+        }
+      } catch (err) {
+        if (isMounted && err.status !== 401) {
+          setErrorMessage('Could not load chats. Server may be starting up...');
+        }
+      }
+    }
+
+    init();
+    return () => { isMounted = false; };
+  }, [routeChatId]);
+
+  // Load active chat's messages and documents
+  useEffect(() => {
+    if (!activeChatId) {
+      setMessages([]);
+      setDocuments([]);
+      return;
+    }
+
+    let isMounted = true;
+    async function loadChatData() {
+      try {
+        const [msgsRes, docs] = await Promise.all([
+          fetchMessages(activeChatId).catch(() => ({ messages: [] })),
+          fetchDocuments(activeChatId).catch(() => []),
+        ]);
+        if (!isMounted) return;
+        setMessages(msgsRes.messages || []);
+        setDocuments(docs);
+      } catch (err) {
+        console.error('Failed to load chat data:', err);
+      }
+    }
+
+    loadChatData();
+    return () => { isMounted = false; };
+  }, [activeChatId]);
+
+  // Actions
+  const handleLogout = () => {
+    clearToken();
+    navigate('/login', { replace: true });
+  };
+
+  const handleCreateChat = async () => {
+    try {
+      const res = await createChat('New Chat');
+      const newChat = { id: res.chat_id, name: res.chat_name, created_at: new Date().toISOString() };
+      setChats((prev) => [newChat, ...prev]);
+      setActiveChatId(newChat.id);
+      navigate(`/chat/${newChat.id}`);
+      setMobileMenuOpen(false);
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to create chat.');
+    }
+  };
+
+  const handleStartRename = (chat, e) => {
+    e.stopPropagation();
+    setRenameInput({ isOpen: true, chatId: chat.id, name: chat.name });
+  };
+
+  const handleSaveRename = async () => {
+    if (!renameInput.name.trim()) return;
+    try {
+      await renameChat(renameInput.chatId, renameInput.name.trim());
+      setChats((prev) =>
+        prev.map((c) => (c.id === renameInput.chatId ? { ...c, name: renameInput.name.trim() } : c))
+      );
+      setRenameInput({ isOpen: false, chatId: null, name: '' });
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to rename chat.');
+    }
+  };
+
+  const handleDeleteChatConfirm = (chat, e) => {
+    e.stopPropagation();
+    setDialogState({
+      isOpen: true,
+      type: 'delete_chat',
+      target: chat.id,
+      message: `Delete chat "${chat.name}" and all its documents and messages?`,
+    });
+  };
+
+  const handleDeleteDocConfirm = (docName) => {
+    setDialogState({
+      isOpen: true,
+      type: 'delete_doc',
+      target: docName,
+      message: `Delete document "${docName}" from this chat?`,
+    });
+  };
+
+  const handleDeleteAccountConfirm = () => {
+    setDialogState({
+      isOpen: true,
+      type: 'delete_account',
+      target: null,
+      message: 'Are you sure you want to delete your entire account and all data? This cannot be undone.',
+    });
+  };
+
+  const handleDialogConfirm = async () => {
+    const { type, target } = dialogState;
+    setDialogState({ isOpen: false, type: null, target: null, message: '' });
+
+    try {
+      if (type === 'delete_chat') {
+        await deleteChat(target);
+        const remaining = chats.filter((c) => c.id !== target);
+        setChats(remaining);
+        if (activeChatId === target) {
+          const next = remaining.length > 0 ? remaining[0].id : null;
+          setActiveChatId(next);
+          if (next) navigate(`/chat/${next}`);
+          else navigate('/chat');
+        }
+      } else if (type === 'delete_doc') {
+        await deleteDocument(activeChatId, target);
+        setDocuments((prev) => prev.filter((d) => d !== target));
+      } else if (type === 'delete_account') {
+        await deleteAccount();
+        navigate('/login', { replace: true });
+      }
+    } catch (err) {
+      setErrorMessage(err.message || 'Action failed.');
+    }
+  };
+
+  // Upload handling (PDF & TXT only, size check, OCR notice)
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeChatId) return;
+    e.target.value = '';
+
+    const lower = file.name.toLowerCase();
+    const isPdf = lower.endsWith('.pdf') || file.type === 'application/pdf';
+    const isTxt = lower.endsWith('.txt') || file.type === 'text/plain';
+
+    if (!isPdf && !isTxt) {
+      setErrorMessage('Unsupported format. Only PDF and TXT files are accepted.');
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      setErrorMessage('File size exceeds the 10MB limit.');
+      return;
+    }
+
+    setUploading(true);
+    setErrorMessage('');
+    try {
+      await uploadDocument(activeChatId, file);
+      setDocuments((prev) => (prev.includes(file.name) ? prev : [...prev, file.name]));
+      // Update chat name if it's default
+      const current = chats.find((c) => c.id === activeChatId);
+      if (current && (current.name === 'New Chat' || current.name === 'Chat')) {
+        await renameChat(activeChatId, file.name);
+        setChats((prev) =>
+          prev.map((c) => (c.id === activeChatId ? { ...c, name: file.name } : c))
+        );
+      }
+    } catch (err) {
+      setErrorMessage(err.message || 'Upload failed. File might be corrupted or empty.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Streaming ask question
+  const handleAsk = async (e) => {
+    e.preventDefault();
+    if (!question.trim() || !activeChatId || loading) return;
+
+    const userPrompt = question.trim();
+    setQuestion('');
+    setErrorMessage('');
+
+    // Append user message immediately
+    const userMsg = { role: 'user', content: userPrompt };
+    setMessages((prev) => [...prev, userMsg]);
+
+    // Prepare bot placeholder
+    const botMsgId = Date.now();
+    const initialBotMsg = { id: botMsgId, role: 'bot', content: '', provider: null, sources: [] };
+    setMessages((prev) => [...prev, initialBotMsg]);
+
+    setLoading(true);
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const response = await fetch(`${API_BASE}/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({
+          question: userPrompt,
+          chat_id: activeChatId,
+          mode: 'auto',
+        }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          clearToken();
+          navigate('/login', { replace: true });
+          return;
+        }
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.detail || 'Failed to query assistant.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let botContent = '';
+      let botProvider = null;
+      let botSources = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep last incomplete line in buffer
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const event = JSON.parse(jsonStr);
+
+            if (event.type === 'token') {
+              botContent += event.text;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === botMsgId ? { ...m, content: botContent } : m))
+              );
+            } else if (event.type === 'sources') {
+              botSources = event.sources || [];
+              setMessages((prev) =>
+                prev.map((m) => (m.id === botMsgId ? { ...m, sources: botSources } : m))
+              );
+            } else if (event.type === 'metadata' || event.type === 'done') {
+              if (event.provider) botProvider = event.provider;
+              if (event.sources) botSources = event.sources;
+              if (event.detected_language) setDetectedLanguage(event.detected_language);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === botMsgId
+                    ? { ...m, provider: botProvider, sources: botSources }
+                    : m
+                )
+              );
+            } else if (event.type === 'error') {
+              botContent += `\n\n[Error: ${event.error || 'Connection dropped. Please retry.'}]`;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === botMsgId ? { ...m, content: botContent } : m))
+              );
+            }
+          } catch {
+            // ignore non-json SSE lines
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === botMsgId ? { ...m, content: m.content + ' [Stopped by user]' } : m))
+        );
+      } else {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botMsgId
+              ? { ...m, content: m.content || 'An error occurred while answering. Please try again.' }
+              : m
+          )
+        );
+        setErrorMessage(err.message || 'Stream interrupted.');
+      }
+    } finally {
+      setLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
+  const activeChat = chats.find((c) => c.id === activeChatId);
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      padding: '20px 24px 48px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '20px',
+      position: 'relative',
+    }}>
+      {/* Top Navigation Bar */}
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '14px',
+        width: '100%',
+        maxWidth: '1360px',
+        margin: '0 auto',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <RetroButton
+            className="deco-mobile-toggle"
+            variant="alt"
+            size="sm"
+            style={{ display: 'none' }}
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            ariaLabel="Toggle Sidebar"
+          >
+            ☰
+          </RetroButton>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <BoltIcon size={32} />
+            <span style={{
+              fontFamily: 'var(--font-display)',
+              fontWeight: 800,
+              fontSize: '28px',
+              letterSpacing: '-0.02em',
+              lineHeight: 1
+            }}>
+              LexiRAG
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+          <span className="chip" style={{ minHeight: '32px' }}>
+            Language: {detectedLanguage}
+          </span>
+          <RetroButton variant="alt" size="sm" onClick={handleLogout}>
+            Log out
+          </RetroButton>
+        </div>
       </div>
-      
-      {/* MAIN CHAT AREA - Messages */}
-      <div className="chat-main">
-        <div className="messages">
-          {messages.length === 0 ? (
-            <div className="empty-state">
-              <h3>Start a conversation</h3>
-              <p>Create a chat and upload a document to begin</p>
+
+      {/* Backend cold start wake-up banner */}
+      {backendWakingUp && (
+        <div style={{
+          maxWidth: '1360px',
+          margin: '0 auto',
+          width: '100%',
+          padding: '12px 16px',
+          background: 'var(--yellow)',
+          border: 'var(--border)',
+          borderRadius: '4px',
+          boxShadow: 'var(--shadow-btn)',
+          fontWeight: 700,
+          fontSize: '13px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <WarningIcon size={20} />
+          <span>Server is waking up (Render free-tier cold start), this can take up to a minute...</span>
+        </div>
+      )}
+
+      {/* Offline indicator banner */}
+      {isOffline && (
+        <div style={{
+          maxWidth: '1360px',
+          margin: '0 auto',
+          width: '100%',
+          padding: '12px 16px',
+          background: 'var(--red)',
+          color: 'var(--cream-light)',
+          border: 'var(--border)',
+          borderRadius: '4px',
+          boxShadow: 'var(--shadow-btn)',
+          fontWeight: 700,
+          fontSize: '13px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <WarningIcon size={20} />
+          <span>You appear to be offline. Network requests will fail until connection is restored.</span>
+        </div>
+      )}
+
+      {/* Main 3-Column Content Layout */}
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'stretch',
+        gap: '20px',
+        width: '100%',
+        maxWidth: '1360px',
+        margin: '0 auto',
+        flex: 1,
+      }}>
+        {/* Left Column: My Chats & Who Answers */}
+        <div style={{
+          flex: '0 0 280px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '20px',
+          minWidth: '260px',
+        }}>
+          {/* Chats Window */}
+          <RetroWindow title="My chats" variant="amber">
+            <div style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <RetroButton onClick={handleCreateChat} style={{ width: '100%' }}>
+                + New chat
+              </RetroButton>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '280px', overflowY: 'auto' }}>
+                {chats.length === 0 ? (
+                  <div style={{ fontSize: '13px', color: 'rgba(59, 30, 23, 0.6)', padding: '8px 0', textAlign: 'center' }}>
+                    No chats yet
+                  </div>
+                ) : (
+                  chats.map((chat) => (
+                    <div
+                      key={chat.id}
+                      className={`chatrow ${chat.id === activeChatId ? 'on' : ''}`}
+                      onClick={() => {
+                        setActiveChatId(chat.id);
+                        navigate(`/chat/${chat.id}`);
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                        <FolderIcon size={20} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {chat.name}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        <button
+                          type="button"
+                          onClick={(e) => handleStartRename(chat, e)}
+                          title="Rename"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '12px' }}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteChatConfirm(chat, e)}
+                          title="Delete"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', fontSize: '12px', color: 'var(--red)' }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-          ) : (
-            <>
-              {messages.map((msg, i) => (
-                <div key={i} className={`message ${msg.type}`}>
-                  {msg.type === 'bot' ? (
-                    <ReactMarkdown>{msg.text}</ReactMarkdown>
-                  ) : (
-                    msg.text
-                  )}
+          </RetroWindow>
+
+          {/* Who Answers Window (Groq & Gemini ONLY - Phase B5) */}
+          <RetroWindow title="Who answers" variant="lilac">
+            <div style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ padding: '8px 10px', background: 'var(--cream-light)', border: '1.5px solid var(--ink)', borderRadius: '3px' }}>
+                <div style={{ fontWeight: 800, fontSize: '13px', color: 'var(--red)' }}>Groq</div>
+                <div style={{ fontSize: '12px' }}>for quick English questions</div>
+              </div>
+              <div style={{ padding: '8px 10px', background: 'var(--cream-light)', border: '1.5px solid var(--ink)', borderRadius: '3px' }}>
+                <div style={{ fontWeight: 800, fontSize: '13px', color: '#1a73e8' }}>Gemini</div>
+                <div style={{ fontSize: '12px' }}>for regional languages (Hindi, Kannada, Tamil, Telugu)</div>
+              </div>
+            </div>
+          </RetroWindow>
+
+          {/* Account & Data Management Window */}
+          <RetroWindow title="Account" variant="red">
+            <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ fontSize: '13px', fontWeight: 600 }}>User: {username}</div>
+              <RetroButton
+                variant="danger"
+                size="sm"
+                onClick={handleDeleteAccountConfirm}
+                style={{ width: '100%' }}
+              >
+                Delete account &amp; data
+              </RetroButton>
+            </div>
+          </RetroWindow>
+        </div>
+
+        {/* Center Column: Chat Messages & Input */}
+        <div style={{
+          flex: '1 1 500px',
+          display: 'flex',
+          flexDirection: 'column',
+          minWidth: '320px',
+        }}>
+          <RetroWindow
+            title={activeChat ? activeChat.name : 'Select a Chat'}
+            variant="red"
+            style={{ height: '100%', minHeight: '620px', display: 'flex', flexDirection: 'column' }}
+          >
+            {/* Messages Display Area */}
+            <div style={{
+              flex: 1,
+              padding: '16px',
+              overflowY: 'auto',
+              maxHeight: '520px',
+              display: 'flex',
+              flexDirection: 'column',
+              background: 'var(--cream-light)',
+            }}>
+              {messages.length === 0 ? (
+                <div style={{
+                  margin: 'auto',
+                  textAlign: 'center',
+                  padding: '32px 16px',
+                  color: 'rgba(59, 30, 23, 0.75)',
+                  maxWidth: '380px'
+                }}>
+                  <SparkleIcon size={32} style={{ margin: '0 auto 12px' }} />
+                  <div style={{ fontWeight: 800, fontSize: '16px', marginBottom: '6px' }}>Nothing here yet</div>
+                  <div style={{ fontSize: '13px', lineHeight: '1.4' }}>
+                    Ask a question about the documents in this chat and the answer shows up here with sources attached.
+                  </div>
                 </div>
-              ))}
-              {loading && (
-                <div className="message bot">
-                  <span>🤖</span>
+              ) : (
+                messages.map((m, idx) => (
+                  <MessageItem key={m.id || idx} msg={m} />
+                ))
+              )}
+              {loading && !messages.some((m) => m.role === 'bot' && m.content) && (
+                <div style={{ fontSize: '13px', fontStyle: 'italic', color: 'rgba(59, 30, 23, 0.7)', padding: '8px' }}>
+                  Thinking &amp; streaming response...
                 </div>
               )}
-            </>
-          )}
-        </div>
-        
-        {/* Input Area */}
-        <div className="input-area">
-          <input
-            type="text"
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && sendQuestion()}
-            placeholder="Ask a question about your document..."
-            disabled={loading}
-          />
-          <button
-            onClick={sendQuestion}
-            disabled={loading}
-            className="send-btn"
-          >
-            {loading ? '⏳' : '➤'}
-          </button>
-        </div>
-      </div>
-      
-      {/* RIGHT SIDEBAR - Chat List */}
-      <div className="chat-sidebar-right">
-        <h2>Chats</h2>
-        <button onClick={createNewChat} className="new-chat-btn">
-          ➕ New Chat
-        </button>
-        <div className="chat-list">
-          {chats.length === 0 ? (
-            <div style={{ fontSize: '12px', color: '#666', padding: '10px' }}>
-              No chats yet
+              <div ref={messagesEndRef} />
             </div>
-          ) : (
-            chats.map((chat) => (
-              <div key={chat.id} className="chat-item-wrapper">
-                <div
-                  className={`chat-item ${currentChatId === chat.id ? 'active' : ''}`}
-                  onClick={() => switchChat(chat.id)}
-                >
-                  {chat.name}
-                </div>
+
+            {/* Error banner if any */}
+            {errorMessage && (
+              <div style={{
+                padding: '8px 14px',
+                background: 'var(--red)',
+                color: 'var(--cream-light)',
+                fontSize: '12px',
+                fontWeight: 600,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <span>{errorMessage}</span>
                 <button
-                  onClick={(e) => deleteChat(chat.id, e)}
-                  className="delete-icon-btn"
+                  type="button"
+                  onClick={() => setErrorMessage('')}
+                  style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 800 }}
                 >
-                  🗑️
+                  ✕
                 </button>
               </div>
-            ))
-          )}
+            )}
+
+            {/* Input Form */}
+            <form onSubmit={handleAsk} style={{
+              padding: '14px',
+              borderTop: 'var(--border)',
+              background: 'var(--cream)',
+              display: 'flex',
+              gap: '10px',
+              alignItems: 'center'
+            }}>
+              <input
+                type="text"
+                className="fld"
+                placeholder={activeChatId ? "Ask a question about your documents..." : "Create or select a chat first"}
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                disabled={!activeChatId}
+                style={{ flex: 1 }}
+              />
+              {loading ? (
+                <RetroButton variant="danger" type="button" onClick={handleStop}>
+                  Stop
+                </RetroButton>
+              ) : (
+                <RetroButton type="submit" disabled={!activeChatId || !question.trim()}>
+                  Send
+                </RetroButton>
+              )}
+            </form>
+          </RetroWindow>
+        </div>
+
+        {/* Right Column: Documents Attached to Active Chat */}
+        <div style={{
+          flex: '0 0 280px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '20px',
+          minWidth: '260px',
+        }}>
+          {/* Documents Window */}
+          <RetroWindow title="Documents" variant="red">
+            <div style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {/* Upload Button */}
+              <label style={{ display: 'block', width: '100%' }}>
+                <input
+                  type="file"
+                  accept=".pdf,.txt"
+                  onChange={handleFileUpload}
+                  disabled={!activeChatId || uploading}
+                  style={{ display: 'none' }}
+                />
+                <span className="btn" style={{
+                  width: '100%',
+                  pointerEvents: (!activeChatId || uploading) ? 'none' : 'auto',
+                  opacity: (!activeChatId || uploading) ? 0.6 : 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
+                }}>
+                  {uploading ? 'Reading file...' : '+ Upload file'}
+                </span>
+              </label>
+
+              {uploading && (
+                <div style={{
+                  padding: '8px',
+                  background: 'var(--yellow)',
+                  border: '1px solid var(--ink)',
+                  borderRadius: '3px',
+                  fontSize: '11px',
+                  lineHeight: '1.3'
+                }}>
+                  Reading file / scanned pages are read with OCR...
+                </div>
+              )}
+
+              {/* Document list */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '300px', overflowY: 'auto' }}>
+                {documents.length === 0 ? (
+                  <div style={{ fontSize: '13px', color: 'rgba(59, 30, 23, 0.6)', textAlign: 'center', padding: '12px 0' }}>
+                    No documents attached yet.
+                  </div>
+                ) : (
+                  documents.map((doc) => (
+                    <div
+                      key={doc}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 10px',
+                        background: 'var(--cream-light)',
+                        border: '1.5px solid var(--ink)',
+                        borderRadius: '3px',
+                        fontSize: '13px',
+                        fontWeight: 600,
+                        gap: '8px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                        <FileDocIcon size={16} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {doc}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteDocConfirm(doc)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontWeight: 800 }}
+                        title="Delete document"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </RetroWindow>
+
+          {/* Heads Up Privacy Note */}
+          <RetroWindow title="Heads up" variant="amber">
+            <div style={{ padding: '14px', fontSize: '12px', lineHeight: '1.45', display: 'flex', gap: '8px' }}>
+              <WarningIcon size={20} />
+              <span>Your document text is sent to Groq or Gemini to answer questions.</span>
+            </div>
+          </RetroWindow>
         </div>
       </div>
+
+      {/* Retro Confirm Modal */}
+      <RetroDialog
+        isOpen={dialogState.isOpen}
+        title="Confirm action"
+        message={dialogState.message}
+        danger={dialogState.type === 'delete_account' || dialogState.type === 'delete_chat'}
+        confirmText="Confirm"
+        onConfirm={handleDialogConfirm}
+        onCancel={() => setDialogState({ isOpen: false, type: null, target: null, message: '' })}
+      />
+
+      {/* Rename Chat Modal */}
+      {renameInput.isOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(59, 30, 23, 0.45)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '16px',
+        }}>
+          <RetroWindow title="Rename chat" variant="amber" style={{ width: '100%', maxWidth: '380px' }}>
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <RetroField
+                label="New chat name"
+                id="rename-chat"
+                value={renameInput.name}
+                onChange={(e) => setRenameInput((p) => ({ ...p, name: e.target.value }))}
+                autoFocus
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <RetroButton variant="alt" onClick={() => setRenameInput({ isOpen: false, chatId: null, name: '' })}>
+                  Cancel
+                </RetroButton>
+                <RetroButton onClick={handleSaveRename}>
+                  Save
+                </RetroButton>
+              </div>
+            </div>
+          </RetroWindow>
+        </div>
+      )}
     </div>
   );
 }

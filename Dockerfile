@@ -19,7 +19,7 @@ RUN pip install -r requirements.txt
 # Download the embedding model at build time so the first request is not slow
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', cache_dir='/opt/fastembed')"
 
-COPY main.py rag.py database.py embeddings.py ./
+COPY main.py rag.py database.py db.py embeddings.py ./
 
 RUN useradd --create-home appuser && chown -R appuser /app /opt/fastembed
 USER appuser
