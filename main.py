@@ -712,6 +712,47 @@ async def delete_my_account(authorization: Optional[str] = Header(None)):
 # 11. ENDPOINTS - RAG STREAMING (POST /ask)
 # ============================================
 
+def rank_chunks_vectorized(rows, query_embedding, top_k=5):
+    """
+    Ranks chunks using vectorized matrix-vector multiplication and argpartition.
+    - Stacks valid chunk embeddings into a single float32 matrix
+    - Scores via single matrix-vector product
+    - Selects top k with argpartition and sorts top k descending
+    """
+    valid_chunks = []
+    vectors = []
+    for row in rows:
+        try:
+            emb = json.loads(row[2])
+            vectors.append(emb)
+            valid_chunks.append({
+                "doc_name": row[0],
+                "chunk_text": row[1]
+            })
+        except Exception:
+            pass
+
+    if not valid_chunks:
+        return []
+
+    matrix = np.asarray(vectors, dtype=np.float32)
+    q_vec = np.asarray(query_embedding, dtype=np.float32)
+    scores = matrix @ q_vec
+
+    k = min(top_k, len(scores))
+    if len(scores) <= top_k:
+        top_indices = np.argsort(-scores)
+    else:
+        partition_idx = np.argpartition(-scores, k)[:k]
+        top_indices = partition_idx[np.argsort(-scores[partition_idx])]
+
+    ranked = []
+    for idx in top_indices:
+        chunk = dict(valid_chunks[idx])
+        chunk["similarity"] = float(scores[idx])
+        ranked.append(chunk)
+    return ranked
+
 @app.post("/ask")
 @limiter.limit("20/hour")
 async def ask_question(request: Request, payload: dict, authorization: Optional[str] = Header(None)):
@@ -770,25 +811,7 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
     rows = cursor.fetchall()
     conn.close()
 
-    relevant_chunks = []
-    for row in rows:
-        try:
-            emb = np.array(json.loads(row[2]))
-            similarity = np.dot(query_embedding, emb)
-            relevant_chunks.append({
-                "doc_name": row[0],
-                "chunk_text": row[1],
-                "similarity": similarity
-            })
-        except Exception:
-            pass
-
-    relevant_chunks = sorted(
-        relevant_chunks,
-        key=lambda x: x['similarity'],
-        reverse=True
-    )[:5]
-
+    relevant_chunks = rank_chunks_vectorized(rows, query_embedding, top_k=5)
     sources = list(dict.fromkeys([c["doc_name"] for c in relevant_chunks]))
 
     def stream():

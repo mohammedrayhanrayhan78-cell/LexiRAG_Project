@@ -658,3 +658,44 @@ def test_idor_protection_across_endpoints():
 
     run_async(_test())
 
+
+def test_vectorized_retrieval_ranking_matches_legacy():
+    """Verify that vectorized retrieval with matrix product and argpartition matches legacy scoring order exactly"""
+    import numpy as np
+    import json
+    from main import rank_chunks_vectorized
+
+    np.random.seed(1337)
+    dim = 384
+    q_vec = np.random.randn(dim).astype(np.float32)
+
+    sample_rows = []
+    legacy_chunks = []
+    for i in range(35):
+        emb = np.random.randn(dim).astype(np.float32)
+        doc_name = f"doc_{i}.txt"
+        chunk_text = f"Sample chunk text content number {i}"
+        sample_rows.append((doc_name, chunk_text, json.dumps(emb.tolist())))
+
+        # Legacy calculation: per-row loop and np.dot
+        sim = float(np.dot(q_vec, emb))
+        legacy_chunks.append({
+            "doc_name": doc_name,
+            "chunk_text": chunk_text,
+            "similarity": sim
+        })
+
+    # Legacy top 5
+    legacy_top5 = sorted(legacy_chunks, key=lambda x: x["similarity"], reverse=True)[:5]
+
+    # Vectorized top 5
+    vectorized_top5 = rank_chunks_vectorized(sample_rows, q_vec, top_k=5)
+
+    assert len(vectorized_top5) == 5
+    assert [c["doc_name"] for c in vectorized_top5] == [c["doc_name"] for c in legacy_top5]
+    for vec_chunk, leg_chunk in zip(vectorized_top5, legacy_top5):
+        assert vec_chunk["doc_name"] == leg_chunk["doc_name"]
+        assert vec_chunk["chunk_text"] == leg_chunk["chunk_text"]
+        assert np.isclose(vec_chunk["similarity"], leg_chunk["similarity"], atol=1e-5)
+
+
