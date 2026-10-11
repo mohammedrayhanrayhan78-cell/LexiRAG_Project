@@ -111,7 +111,19 @@ export default function Chat() {
   const [uploading, setUploading] = useState(false);
   const [detectedLanguage, setDetectedLanguage] = useState('auto-detect');
   const [backendWakingUp, setBackendWakingUp] = useState(false);
+  const [isOffline, setIsOffline] = useState(typeof navigator !== 'undefined' ? !navigator.onLine : false);
   const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Modal dialog states
@@ -528,6 +540,29 @@ export default function Chat() {
         }}>
           <WarningIcon size={20} />
           <span>Server is waking up (Render free-tier cold start), this can take up to a minute...</span>
+        </div>
+      )}
+
+      {/* Offline indicator banner */}
+      {isOffline && (
+        <div style={{
+          maxWidth: '1360px',
+          margin: '0 auto',
+          width: '100%',
+          padding: '12px 16px',
+          background: 'var(--red)',
+          color: 'var(--cream-light)',
+          border: 'var(--border)',
+          borderRadius: '4px',
+          boxShadow: 'var(--shadow-btn)',
+          fontWeight: 700,
+          fontSize: '13px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <WarningIcon size={20} />
+          <span>You appear to be offline. Network requests will fail until connection is restored.</span>
         </div>
       )}
 
