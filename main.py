@@ -617,6 +617,11 @@ async def get_chats(username: str, authorization: Optional[str] = Header(None)):
     chats = get_user_chats(token_username)
     return {"chats": chats}
 
+def _clean_chat_name(raw, default):
+    name = raw.strip() if isinstance(raw, str) else ""
+    return name[:100] or default
+
+
 @app.post("/chats")
 @app.post("/chats/new")
 @limiter.limit("20/hour")
@@ -626,8 +631,8 @@ async def create_chat(request: Request, payload: dict, authorization: Optional[s
     Create new chat for authenticated user.
     """
     username = verify_token(authorization)
-    chat_name = payload.get("chat_name", "New Chat")
-    chat_name = html.escape(chat_name)
+    chat_name = _clean_chat_name(payload.get("chat_name"), "New Chat")
+    # stored raw: React escapes on render
     chat_id = create_new_chat(username, chat_name)
     return {
         "chat_id": chat_id,
@@ -677,8 +682,8 @@ async def rename_chat(
     """Rename a chat (with ownership check)"""
     username = verify_token(authorization)
     verify_chat_ownership(chat_id, username)
-    chat_name = payload.get("chat_name", "Chat")
-    chat_name = html.escape(chat_name)
+    chat_name = _clean_chat_name(payload.get("chat_name"), "Chat")
+    # stored raw: React escapes on render
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE chat_sessions SET chat_name = ? WHERE id = ?", (chat_name, chat_id))
