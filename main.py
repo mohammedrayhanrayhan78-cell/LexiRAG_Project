@@ -156,11 +156,25 @@ class AuthRateLimiter:
 REDIS_URL = os.getenv("REDIS_URL")
 auth_limiter = AuthRateLimiter(REDIS_URL)
 
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+
 def get_client_ip(request: Request) -> str:
-    """Extract client IP from headers (proxy/ngrok friendly) or direct connection"""
+    """
+    Extract client IP safely against IP spoofing behind reverse proxies.
+    
+    Render Proxy Architecture & Reasoning:
+    On Render, inbound traffic passes through Render's reverse proxy / load balancer,
+    which appends the connecting client's IP to the right side of the X-Forwarded-For header.
+    Any IP address prepended by the incoming client cannot be trusted.
+    By reading from the right side at index -TRUSTED_PROXY_HOPS (default 1),
+    we inspect the IP address appended by our trusted edge proxy and ignore any client-prepended values.
+    If X-Forwarded-For contains fewer entries than TRUSTED_PROXY_HOPS, we fall back to request.client.host.
+    """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if len(parts) >= TRUSTED_PROXY_HOPS:
+            return parts[-TRUSTED_PROXY_HOPS]
     if request.client and request.client.host:
         return request.client.host
     return "127.0.0.1"
@@ -176,7 +190,7 @@ app = FastAPI(
     openapi_url=None if IS_PROD else "/openapi.json",
 )
 
-# SlowAPI Limiter for other general routes
+# SlowAPI Limiter for other general routes (uses safe get_client_ip key_func)
 def init_slowapi_limiter():
     storage_uri = "memory://"
     if REDIS_URL:
@@ -187,7 +201,7 @@ def init_slowapi_limiter():
             storage_uri = REDIS_URL
         except Exception:
             storage_uri = "memory://"
-    return Limiter(key_func=get_remote_address, storage_uri=storage_uri, headers_enabled=False)
+    return Limiter(key_func=get_client_ip, storage_uri=storage_uri, headers_enabled=False)
 
 limiter = init_slowapi_limiter()
 app.state.limiter = limiter

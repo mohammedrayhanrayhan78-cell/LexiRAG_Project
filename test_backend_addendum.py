@@ -513,3 +513,54 @@ def test_streaming_wire_format_metadata_and_error_handling():
                 main.ask_llm_stream = original_ask
 
     run_async(_test())
+
+
+def test_spoofed_forwarded_for_client_ip():
+    """Prove that spoofed leading X-Forwarded-For entries do NOT alter the client IP or bypass rate limits"""
+    from starlette.requests import Request
+    from main import get_client_ip, auth_limiter
+
+    # 1. Direct get_client_ip test with Starlette Request scope
+    scope_client = ("127.0.0.1", 12345)
+    
+    # Legitimate single hop from proxy
+    req1 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req1) == "198.51.100.1"
+
+    # Attacker prepends fake IP 203.0.113.195
+    req2 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"203.0.113.195, 198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req2) == "198.51.100.1", "Spoofed leading IP must not change client IP!"
+
+    # Attacker prepends another fake IP 8.8.8.8
+    req3 = Request({"type": "http", "headers": [(b"x-forwarded-for", b"8.8.8.8, 198.51.100.1")], "client": scope_client})
+    assert get_client_ip(req3) == "198.51.100.1", "Spoofed leading IP must not change client IP!"
+
+    # Fallback to direct client host when header missing
+    req_no_header = Request({"type": "http", "headers": [], "client": ("192.168.1.50", 12345)})
+    assert get_client_ip(req_no_header) == "192.168.1.50"
+
+    # 2. Integration test: 5 signup attempts with varying spoofed headers from the SAME real edge IP get rate limited
+    async def _test_rl():
+        auth_limiter.reset()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            real_proxy_ip = "198.51.100.77"
+            for i in range(5):
+                spoofed_header = f"fake.{i}.0.1, {real_proxy_ip}"
+                res = await client.post(
+                    "/signup",
+                    json={"username": f"user_spoof_{i}_{uuid.uuid4().hex[:6]}", "password": "password123"},
+                    headers={"X-Forwarded-For": spoofed_header}
+                )
+                assert res.status_code == 200, f"Attempt {i+1} failed: {res.text}"
+
+            # 6th attempt with yet another spoofed leading IP must be blocked with 429
+            sixth_spoofed_header = f"attacker.ip.99.99, {real_proxy_ip}"
+            blocked = await client.post(
+                "/signup",
+                json={"username": f"user_spoof_blocked_{uuid.uuid4().hex[:6]}", "password": "password123"},
+                headers={"X-Forwarded-For": sixth_spoofed_header}
+            )
+            assert blocked.status_code == 429, "Attacker bypassed rate limit by changing spoofed leading XFF!"
+            assert "Retry-After" in blocked.headers
+
+    run_async(_test_rl())
