@@ -43,12 +43,23 @@ from database import (
     get_documents, save_chunks_batch, create_user, verify_user, 
     save_chat_message, get_chat_messages, get_user_chats, create_new_chat,
     get_chat_owner, delete_chat_and_chunks, delete_chat_document,
-    delete_user_document, get_chat_documents, delete_user_account
+    delete_user_document, get_chat_documents, delete_user_account, DB_PATH
 )
 from embeddings import get_embedding, get_embeddings_batch, detect_language
-from rag import find_relevant_chunks, ask_llm_stream, classify_complexity
+from rag import (
+    find_relevant_chunks, ask_llm_stream, classify_complexity,
+    LLMUnavailable, GENERIC_LLM_ERROR
+)
 
-pytesseract.pytesseract.pytesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Tesseract: use TESSERACT_CMD if set (e.g. a Windows path in .env); otherwise rely on PATH (Linux/Docker)
+_tesseract_cmd = os.getenv("TESSERACT_CMD")
+if _tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+
+# OCR languages (needs the matching Tesseract language packs; Dockerfile installs them)
+OCR_LANGS = os.getenv("OCR_LANGS", "eng+hin+kan+tam+tel")
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", 100))   # pages read per PDF
+MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", 15))    # scanned pages OCR'd per PDF (CPU protection)
 
 # ============================================
 # 2. PYDANTIC MODELS - Input validation
@@ -158,7 +169,12 @@ def get_client_ip(request: Request) -> str:
 # 4. FASTAPI APP SETUP & CORS
 # ============================================
 
-app = FastAPI()
+IS_PROD = os.getenv("ENV", "dev").lower() == "prod"
+app = FastAPI(
+    docs_url=None if IS_PROD else "/docs",
+    redoc_url=None if IS_PROD else "/redoc",
+    openapi_url=None if IS_PROD else "/openapi.json",
+)
 
 # SlowAPI Limiter for other general routes
 def init_slowapi_limiter():
@@ -190,14 +206,19 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
         headers={"Retry-After": retry_after}
     )
 
+# Exact origins only, comma-separated in ALLOWED_ORIGINS (e.g. https://lexirag-web.onrender.com)
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:8000"
+).split(",") if o.strip()]
+
 # CORS Middleware:
 # Exposes Retry-After and explicitly allows Authorization header
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*", "Authorization"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,  # we use Bearer tokens, not cookies
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
     expose_headers=["Retry-After"],
 )
 
@@ -207,7 +228,7 @@ init_users_table()
 
 def init_chat_tables():
     """Create chat and message tables on startup"""
-    conn = sqlite3.connect("lexirag.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -240,18 +261,29 @@ init_chat_tables()
 # Files are NEVER stored on disk.
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 10 * 1024 * 1024))
 
+def _ocr_image(image):
+    """OCR one page image; falls back to English-only if a language pack is missing."""
+    try:
+        return pytesseract.image_to_string(image, lang=OCR_LANGS)
+    except Exception:
+        try:
+            return pytesseract.image_to_string(image, lang="eng")
+        except Exception:
+            return ""
+
 def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
-    """Extract text from in-memory PDF bytes with OCR fallback"""
+    """Extract text from in-memory PDF bytes with OCR fallback (page-capped)"""
     text = ""
+    ocr_pages = 0
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
+        for page in pdf.pages[:MAX_PDF_PAGES]:
             page_text = page.extract_text()
             if page_text and len(page_text.strip()) > 50:
                 text += page_text + "\n"
-            else:
+            elif ocr_pages < MAX_OCR_PAGES:
+                ocr_pages += 1
                 try:
-                    image = page.to_image()
-                    ocr_text = pytesseract.image_to_string(image.original)
+                    ocr_text = _ocr_image(page.to_image().original)
                     if ocr_text:
                         text += ocr_text + "\n"
                 except Exception:
@@ -332,7 +364,13 @@ def split_into_chunks(text, chunk_size=300):
 # 6. SECURITY - JWT TOKEN & CHAT OWNERSHIP
 # ============================================
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "3FdMN9FNZevIsYiLPTnU0hUOg0O_3Wzwovm52AGfe7wCLtsBM")
+# REQUIRED: no default value. The app refuses to start without a strong secret.
+SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY")
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError(
+        "JWT_SECRET_KEY is missing or too short (need at least 32 characters). "
+        "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
 
 def verify_token(authorization: Optional[str] = Header(None)) -> str:
     """Verify JWT token and return authenticated username"""
@@ -627,7 +665,7 @@ async def rename_chat(
     verify_chat_ownership(chat_id, username)
     chat_name = payload.get("chat_name", "Chat")
     chat_name = html.escape(chat_name)
-    conn = sqlite3.connect("lexirag.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("UPDATE chat_sessions SET chat_name = ? WHERE id = ?", (chat_name, chat_id))
     conn.commit()
@@ -695,24 +733,21 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
 
     # Resolve model choice
     if mode == "auto":
-        complexity = classify_complexity(question)
-        if complexity == 'complex':
-            selected_model = 'ollama'
-        elif lang_code != 'en':
-            selected_model = 'gemini'
-        else:
-            selected_model = 'groq'
-    else:
+        selected_model = 'gemini' if lang_code != 'en' else 'groq'
+    elif mode in ("groq", "gemini"):
         selected_model = mode
+    else:
+        selected_model = 'groq'  # unknown/legacy values (e.g. "ollama") -> Groq
 
-    # Final provider mapping ("groq" or "gemini")
-    provider = "gemini" if selected_model == "gemini" else "groq"
+    # Provider we try first; the real one is reported after streaming (fallback may switch it)
+    provider = selected_model
+    info = {}
 
     # Generate query embedding
     query_embedding = get_embedding(question)
 
     # Fetch chunks from THIS chat only
-    conn = sqlite3.connect("lexirag.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "SELECT doc_name, chunk_text, embedding FROM chunks WHERE chat_id = ?",
@@ -748,22 +783,24 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources, 'model': selected_model})}\n\n"
 
             # 2. Token-by-token streaming
-            for token in ask_llm_stream(question, relevant_chunks, mode=selected_model):
-                # If an error was yielded by underlying LLM client
-                if token.startswith("Groq Error:") or token.startswith("Gemini Error:") or token.startswith("Groq error:") or token.startswith("Gemini error:"):
-                    yield f"data: {json.dumps({'type': 'error', 'error': token, 'detail': token})}\n\n"
-                    return
+            for token in ask_llm_stream(question, relevant_chunks, mode=selected_model, info=info):
                 yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
 
+            provider_used = info.get("provider", provider)
+
             # 3. Final metadata item containing provider, sources, and detected language
-            yield f"data: {json.dumps({'type': 'metadata', 'provider': provider, 'sources': sources, 'detected_language': detected_language, 'language': detected_language})}\n\n"
+            yield f"data: {json.dumps({'type': 'metadata', 'provider': provider_used, 'sources': sources, 'detected_language': detected_language, 'language': detected_language})}\n\n"
 
             # 4. Stream completion done signal
-            yield f"data: {json.dumps({'type': 'done', 'provider': provider, 'sources': sources, 'detected_language': detected_language, 'language': detected_language})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'provider': provider_used, 'sources': sources, 'detected_language': detected_language, 'language': detected_language})}\n\n"
 
-        except Exception as e:
-            # Mid-stream error handling: always cleanly yield error item, never hang connection
+        except LLMUnavailable as e:
+            # Message is user-safe by construction (no URLs, keys or provider bodies)
             yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'detail': str(e)})}\n\n"
+        except Exception as e:
+            # Never leak internals to the client; log only the exception type
+            print(f"[ask] stream failed: {type(e).__name__}")
+            yield f"data: {json.dumps({'type': 'error', 'error': GENERIC_LLM_ERROR, 'detail': GENERIC_LLM_ERROR})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -785,6 +822,7 @@ async def ask_question_in_chat(
 # ============================================
 
 @app.get("/health")
+@app.get("/healthz")
 async def health():
     """ENDPOINT: GET /health - Server health check"""
     return {"status": "LexiRAG is running ✅"}
@@ -794,5 +832,6 @@ async def health():
 # ============================================
 
 # Serve React frontend if dist directory exists (must be added AFTER all API routes)
-if os.path.exists("lexirag-react/dist"):
+# Opt-in only (local single-port mode). In cloud the frontend is a separate static site.
+if os.getenv("SERVE_FRONTEND") == "1" and os.path.exists("lexirag-react/dist"):
     app.mount("/", StaticFiles(directory="lexirag-react/dist", html=True), name="static")

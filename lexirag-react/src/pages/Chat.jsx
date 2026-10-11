@@ -32,7 +32,7 @@ export default function Chat({ onLogout }) {
   
   // API BASE URL - Works on localhost AND ngrok
   // If you need ngrok: change to 'https://octopus-domestic-clicker.ngrok-free.dev'
-  const API = 'http://localhost:8000';
+  const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
   
   // ============================================
   // HELPER - Get username from localStorage

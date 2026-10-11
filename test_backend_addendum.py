@@ -24,6 +24,8 @@ import uuid
 import httpx
 import pytest
 
+os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-not-for-production-0123456789")
+
 from main import app, auth_limiter, MAX_FILE_SIZE
 from database import DB_PATH
 
@@ -504,7 +506,9 @@ def test_streaming_wire_format_metadata_and_error_handling():
                 err_types = [e.get("type") for e in err_events]
                 assert "error" in err_types, f"Expected clean error item, got {err_events}"
                 error_item = next(e for e in err_events if e.get("type") == "error")
-                assert "Simulated mid-stream API connection reset" in error_item["error"]
+                # Raw internal error text must NEVER reach the client
+                assert "Simulated mid-stream API connection reset" not in json.dumps(err_events)
+                assert error_item["error"]
             finally:
                 main.ask_llm_stream = original_ask
 

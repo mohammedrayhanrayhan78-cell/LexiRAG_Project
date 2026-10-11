@@ -1,0 +1,12 @@
+.git
+.env
+*.db
+uploads/
+venv/
+__pycache__/
+lexirag-react/
+design/
+deploy.zip
+test_*.py
+requirements-dev.txt
+README.md
