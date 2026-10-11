@@ -15,7 +15,7 @@ import html
 import io
 import os
 import json
-import sqlite3
+from db import get_connection, init_schema
 import time
 import threading
 from collections import defaultdict
@@ -228,28 +228,7 @@ init_users_table()
 
 def init_chat_tables():
     """Create chat and message tables on startup"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            chat_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(username) REFERENCES users(username)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            role TEXT,
-            content TEXT,
-            FOREIGN KEY(chat_id) REFERENCES chat_sessions(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    init_schema()
 
 init_chat_tables()
 
@@ -665,7 +644,7 @@ async def rename_chat(
     verify_chat_ownership(chat_id, username)
     chat_name = payload.get("chat_name", "Chat")
     chat_name = html.escape(chat_name)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE chat_sessions SET chat_name = ? WHERE id = ?", (chat_name, chat_id))
     conn.commit()
@@ -747,7 +726,7 @@ async def ask_question(request: Request, payload: dict, authorization: Optional[
     query_embedding = get_embedding(question)
 
     # Fetch chunks from THIS chat only
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT doc_name, chunk_text, embedding FROM chunks WHERE chat_id = ?",

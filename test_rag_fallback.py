@@ -73,9 +73,11 @@ def test_midstream_failure_does_not_mix_models(monkeypatch):
     assert out == ["partial"]
 
 
-def test_missing_secret_key_refuses_to_start():
+def test_missing_secret_key_refuses_to_start(tmp_path):
     import subprocess, sys
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
     env = {k: v for k, v in os.environ.items() if k not in ("JWT_SECRET_KEY", "SECRET_KEY")}
+    env["PYTHONPATH"] = repo_dir
     r = subprocess.run([sys.executable, "-c", "import main"], env=env, capture_output=True, text=True,
-                       cwd=os.path.dirname(os.path.abspath(__file__)))
+                       cwd=str(tmp_path))
     assert r.returncode != 0 and "JWT_SECRET_KEY" in r.stderr

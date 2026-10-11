@@ -27,7 +27,7 @@ import pytest
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-not-for-production-0123456789")
 
 from main import app, auth_limiter, MAX_FILE_SIZE
-from database import DB_PATH
+from db import get_connection, DB_PATH
 
 def run_async(coro):
     return asyncio.run(coro)
@@ -324,7 +324,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             assert upload_res.json()["chunks"] > 0
 
             # Verify chunks exist in DB
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ?", (chat_id,))
             chunk_count_before = cur.fetchone()[0]
@@ -361,7 +361,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             a_del_doc = await client.delete(f"/chats/{chat_id}/documents/{doc_name}", headers=headers_a)
             assert a_del_doc.status_code == 200
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ? AND doc_name = ?", (chat_id, doc_name))
             assert cur.fetchone()[0] == 0
@@ -380,7 +380,7 @@ def test_chat_lifecycle_ownership_and_chunks_cleanup():
             assert del_chat_res.status_code == 200
             assert del_chat_res.json()["status"] == "deleted"
 
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM chunks WHERE chat_id = ?", (chat_id,))
             assert cur.fetchone()[0] == 0, "Chunks were not deleted when chat was deleted!"
@@ -413,7 +413,7 @@ def test_delete_account_and_all_data():
             assert del_res.json()["status"] == "deleted"
 
             # Verify complete database cleanup
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM users WHERE username = ?", (uname,))
             assert cur.fetchone()[0] == 0

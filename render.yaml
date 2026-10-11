@@ -18,8 +18,8 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false                  # exact frontend URL, e.g. https://lexirag-web.onrender.com
-      - key: DATABASE_PATH
-        value: /tmp/lexirag.db       # EPHEMERAL: data resets on restart/spin-down (see README)
+      - key: DATABASE_URL
+        sync: false                  # Neon Postgres URL (e.g. postgresql://user:pass@ep-xyz.neon.tech/neondb?sslmode=require)
       - key: REDIS_URL
         sync: false                  # optional; without it rate limits live in memory
 
